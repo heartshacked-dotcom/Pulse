@@ -1,8 +1,7 @@
-
 import React, { useState, useEffect } from 'react';
 import { useCall } from '../context/CallContext';
 import { CallStatus, CallType, UserProfile } from '../types';
-import { Radio, Volume2, User as UserIcon, Loader2 } from 'lucide-react';
+import { Radio, Volume2, User as UserIcon, Loader2, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { collection, query, limit, getDocs } from 'firebase/firestore';
 import { db } from '../services/firebase';
@@ -19,6 +18,7 @@ const WalkieTalkie: React.FC = () => {
     const [users, setUsers] = useState<UserProfile[]>([]);
     const [isHoldingButton, setIsHoldingButton] = useState(false);
     const [isReady, setIsReady] = useState(false); // Used to unlock audio context
+    const [permissionDenied, setPermissionDenied] = useState(false);
 
     // 1. Fetch Users
     useEffect(() => {
@@ -91,19 +91,42 @@ const WalkieTalkie: React.FC = () => {
         toggleTalk(false);
     };
 
-    const activateApp = () => {
-        ensureAudioContext();
-        setIsReady(true);
+    const activateApp = async () => {
+        setPermissionDenied(false);
+        try {
+            // Explicitly request permission on user interaction to satisfy browser policies
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            // Release the stream immediately, we just needed the permission grant
+            stream.getTracks().forEach(track => track.stop());
+
+            ensureAudioContext();
+            setIsReady(true);
+        } catch (e) {
+            console.error("Permission denied", e);
+            setPermissionDenied(true);
+        }
     };
 
     if (!isReady) {
         return (
-            <div className="h-full flex flex-col items-center justify-center p-8 bg-dark relative z-50">
+            <div className="h-full flex flex-col items-center justify-center p-8 bg-dark relative z-50 safe-area-top safe-area-bottom">
                 <div className="w-32 h-32 rounded-full bg-secondary flex items-center justify-center mb-8 animate-pulse shadow-[0_0_50px_rgba(59,130,246,0.5)]">
                     <Radio size={48} className="text-primary" />
                 </div>
                 <h2 className="text-2xl font-bold mb-4">Tap to go Online</h2>
-                <p className="text-gray-400 text-center mb-8">Pulse needs to activate your speaker to receive messages.</p>
+                <p className="text-gray-400 text-center mb-8">Pulse needs to activate your microphone to start the walkie-talkie.</p>
+                
+                {permissionDenied && (
+                    <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-3 text-left w-full max-w-xs animate-in fade-in slide-in-from-bottom-2">
+                        <AlertTriangle className="text-red-500 shrink-0 mt-0.5" size={20} />
+                        <div>
+                            <p className="text-red-200 font-bold text-sm">Microphone Access Denied</p>
+                            <p className="text-red-300 text-xs mt-1">Please enable microphone permissions in your browser settings to continue.</p>
+                        </div>
+                    </div>
+                )}
+
                 <button 
                     onClick={activateApp}
                     className="w-full max-w-xs py-4 bg-primary text-white font-bold rounded-2xl shadow-lg active:scale-95 transition-transform"

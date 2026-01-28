@@ -1,4 +1,3 @@
-
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { 
   collection, doc, addDoc, updateDoc, onSnapshot, 
@@ -219,54 +218,61 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     ensureAudioContext();
 
-    // 1. Get Local Stream
-    const stream = await rtcRef.current.startLocalStream(type === CallType.VIDEO);
-    setLocalStream(stream);
+    try {
+        // 1. Get Local Stream
+        const stream = await rtcRef.current.startLocalStream(type === CallType.VIDEO);
+        setLocalStream(stream);
 
-    // CRITICAL: Mute immediately for PTT. We start "On Air" but silent.
-    if (type === CallType.PTT) {
-       rtcRef.current.toggleAudio(false);
-    } else {
-       playTone('ON'); // Ringing sound for other calls
-    }
-
-    // 2. Create Offer
-    const offer = await rtcRef.current.createOffer();
-
-    // 3. Create Call Document
-    const callDocRef = doc(collection(db, COLLECTIONS.CALLS));
-    const callId = callDocRef.id;
-    
-    const safeUserPhoto = user.photoURL || null;
-
-    const callData: CallSession = {
-      callId,
-      callerId: user.uid,
-      callerName: user.displayName || 'Unknown',
-      callerPhoto: safeUserPhoto as any, 
-      calleeId,
-      calleeName,
-      type,
-      status: CallStatus.OFFERING,
-      startedAt: Date.now(),
-      activeSpeakerId: null,
-    };
-
-    const firestoreData = {
-        ...callData,
-        offer: { type: offer.type, sdp: offer.sdp }
-    };
-
-    await setDoc(callDocRef, firestoreData);
-
-    rtcRef.current.onIceCandidate(async (candidate) => {
-        if (db) {
-            await addDoc(collection(db, COLLECTIONS.CALLS, callId, 'offerCandidates'), candidate.toJSON());
+        // CRITICAL: Mute immediately for PTT. We start "On Air" but silent.
+        if (type === CallType.PTT) {
+           rtcRef.current.toggleAudio(false);
+        } else {
+           playTone('ON'); // Ringing sound for other calls
         }
-    });
 
-    setActiveCall(callData);
-    setCallStatus(CallStatus.OFFERING);
+        // 2. Create Offer
+        const offer = await rtcRef.current.createOffer();
+
+        // 3. Create Call Document
+        const callDocRef = doc(collection(db, COLLECTIONS.CALLS));
+        const callId = callDocRef.id;
+        
+        const safeUserPhoto = user.photoURL || null;
+
+        const callData: CallSession = {
+          callId,
+          callerId: user.uid,
+          callerName: user.displayName || 'Unknown',
+          callerPhoto: safeUserPhoto as any, 
+          calleeId,
+          calleeName,
+          type,
+          status: CallStatus.OFFERING,
+          startedAt: Date.now(),
+          activeSpeakerId: null,
+        };
+
+        const firestoreData = {
+            ...callData,
+            offer: { type: offer.type, sdp: offer.sdp }
+        };
+
+        await setDoc(callDocRef, firestoreData);
+
+        rtcRef.current.onIceCandidate(async (candidate) => {
+            if (db) {
+                await addDoc(collection(db, COLLECTIONS.CALLS, callId, 'offerCandidates'), candidate.toJSON());
+            }
+        });
+
+        setActiveCall(callData);
+        setCallStatus(CallStatus.OFFERING);
+    } catch (e) {
+        console.error("Failed to start call:", e);
+        // Clean up any partial state
+        setCallStatus(CallStatus.ENDED);
+        setLocalStream(null);
+    }
   };
 
   const answerCall = async () => {
@@ -274,46 +280,53 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     ensureAudioContext();
 
-    // 1. Get Local Stream
-    const stream = await rtcRef.current.startLocalStream(incomingCall.type === CallType.VIDEO);
-    setLocalStream(stream);
+    try {
+        // 1. Get Local Stream
+        const stream = await rtcRef.current.startLocalStream(incomingCall.type === CallType.VIDEO);
+        setLocalStream(stream);
 
-    // CRITICAL: Mute immediately for PTT answer
-    if (incomingCall.type === CallType.PTT) {
-        rtcRef.current.toggleAudio(false);
-    }
+        // CRITICAL: Mute immediately for PTT answer
+        if (incomingCall.type === CallType.PTT) {
+            rtcRef.current.toggleAudio(false);
+        }
 
-    // 2. Get the Offer from DB
-    const callDocRef = doc(db, COLLECTIONS.CALLS, incomingCall.callId);
-    const callDoc = await getDoc(callDocRef);
-    const callData = callDoc.data();
-    
-    if (callData && callData.offer) {
-        await rtcRef.current.peerConnection?.setRemoteDescription(new RTCSessionDescription(callData.offer));
-        const answer = await rtcRef.current.createAnswer(callData.offer);
+        // 2. Get the Offer from DB
+        const callDocRef = doc(db, COLLECTIONS.CALLS, incomingCall.callId);
+        const callDoc = await getDoc(callDocRef);
+        const callData = callDoc.data();
         
-        await updateDoc(callDocRef, {
-            status: CallStatus.CONNECTED,
-            answer: { type: answer.type, sdp: answer.sdp }
-        });
+        if (callData && callData.offer) {
+            await rtcRef.current.peerConnection?.setRemoteDescription(new RTCSessionDescription(callData.offer));
+            const answer = await rtcRef.current.createAnswer(callData.offer);
+            
+            await updateDoc(callDocRef, {
+                status: CallStatus.CONNECTED,
+                answer: { type: answer.type, sdp: answer.sdp }
+            });
 
-        rtcRef.current.onIceCandidate(async (candidate) => {
-            if (db) {
-                await addDoc(collection(db, COLLECTIONS.CALLS, incomingCall.callId, 'answerCandidates'), candidate.toJSON());
-            }
-        });
-        
-        onSnapshot(collection(db, COLLECTIONS.CALLS, incomingCall.callId, 'offerCandidates'), (snapshot) => {
-            snapshot.docChanges().forEach((change) => {
-                if(change.type === 'added') {
-                    rtcRef.current?.addIceCandidate(change.doc.data() as RTCIceCandidateInit);
+            rtcRef.current.onIceCandidate(async (candidate) => {
+                if (db) {
+                    await addDoc(collection(db, COLLECTIONS.CALLS, incomingCall.callId, 'answerCandidates'), candidate.toJSON());
                 }
-            })
-        });
+            });
+            
+            onSnapshot(collection(db, COLLECTIONS.CALLS, incomingCall.callId, 'offerCandidates'), (snapshot) => {
+                snapshot.docChanges().forEach((change) => {
+                    if(change.type === 'added') {
+                        rtcRef.current?.addIceCandidate(change.doc.data() as RTCIceCandidateInit);
+                    }
+                })
+            });
 
-        setActiveCall(incomingCall);
+            setActiveCall(incomingCall);
+            setIncomingCall(null);
+            setCallStatus(CallStatus.CONNECTED);
+        }
+    } catch (e) {
+        console.error("Failed to answer call:", e);
         setIncomingCall(null);
-        setCallStatus(CallStatus.CONNECTED);
+        setCallStatus(CallStatus.ENDED);
+        setLocalStream(null);
     }
   };
 
@@ -322,7 +335,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       if (!rtcRef.current || !activeCall || !db || !user) return;
       
       // 1. Audio Control (Instant)
-      rtcRef.current.toggleAudio(isTalking);
+      // Check if we have a valid stream before toggling
+      if (localStream) {
+          rtcRef.current.toggleAudio(isTalking);
+      }
 
       // 2. Visual Signaling (Firestore Latency ~500ms but persistent)
       // Only update if state actually changes to save writes
@@ -361,22 +377,30 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     
     if (activeCall && db) {
         const duration = Math.floor((Date.now() - activeCall.startedAt) / 1000);
-        await updateDoc(doc(db, COLLECTIONS.CALLS, activeCall.callId), {
-            status: CallStatus.ENDED,
-            endedAt: Date.now(),
-            duration: duration
-        });
+        try {
+            await updateDoc(doc(db, COLLECTIONS.CALLS, activeCall.callId), {
+                status: CallStatus.ENDED,
+                endedAt: Date.now(),
+                duration: duration
+            });
+        } catch (e) {
+            console.error("Error updating end call stat", e);
+        }
     }
     cleanupCall();
   };
 
   const rejectCall = async () => {
       if (incomingCall && db) {
-        await updateDoc(doc(db, COLLECTIONS.CALLS, incomingCall.callId), {
-            status: CallStatus.REJECTED,
-            endedAt: Date.now(),
-            duration: 0
-        });
+        try {
+            await updateDoc(doc(db, COLLECTIONS.CALLS, incomingCall.callId), {
+                status: CallStatus.REJECTED,
+                endedAt: Date.now(),
+                duration: 0
+            });
+        } catch (e) {
+            console.error("Error rejecting call", e);
+        }
       }
       setIncomingCall(null);
       setCallStatus(CallStatus.ENDED);
