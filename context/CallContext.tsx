@@ -1,3 +1,4 @@
+
 import React, { createContext, useContext, useEffect, useState, useRef } from 'react';
 import { 
   collection, doc, addDoc, updateDoc, onSnapshot, 
@@ -21,6 +22,7 @@ interface CallContextType {
   answerCall: () => Promise<void>;
   rejectCall: () => Promise<void>;
   endCall: () => Promise<void>;
+  toggleTalk: (isTalking: boolean) => void;
   remoteStream: MediaStream | null;
   localStream: MediaStream | null;
   playTone: (type: 'ON' | 'OFF') => void;
@@ -151,7 +153,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const callDocRef = doc(db, COLLECTIONS.CALLS, activeCall.callId);
 
-    // Listen to call document changes (Answer, End, Hangup)
+    // Listen to call document changes (Answer, End, Hangup, Active Speaker)
     const unsub = onSnapshot(callDocRef, async (snapshot) => {
         const data = snapshot.data();
         if (!data) return;
@@ -159,7 +161,14 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
         // Remote user answered
         if (data.status === CallStatus.CONNECTED && callStatus === CallStatus.OFFERING) {
             setCallStatus(CallStatus.CONNECTED);
-            if (activeCall.type === CallType.PTT) playTone('ON');
+            if (activeCall.type === CallType.PTT) {
+               playTone('ON');
+            }
+        }
+
+        // Handle Active Speaker visual state
+        if (data.activeSpeakerId !== undefined) {
+             setActiveCall(prev => prev ? ({ ...prev, activeSpeakerId: data.activeSpeakerId }) : null);
         }
 
         // Remote user ended call
@@ -208,14 +217,18 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const makeCall = async (calleeId: string, calleeName: string, type: CallType) => {
     if (!user || !db || !rtcRef.current) return;
 
-    // Ensure audio context is ready
     ensureAudioContext();
-
-    if (type === CallType.PTT) playTone('ON');
 
     // 1. Get Local Stream
     const stream = await rtcRef.current.startLocalStream(type === CallType.VIDEO);
     setLocalStream(stream);
+
+    // CRITICAL: Mute immediately for PTT. We start "On Air" but silent.
+    if (type === CallType.PTT) {
+       rtcRef.current.toggleAudio(false);
+    } else {
+       playTone('ON'); // Ringing sound for other calls
+    }
 
     // 2. Create Offer
     const offer = await rtcRef.current.createOffer();
@@ -224,7 +237,6 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const callDocRef = doc(collection(db, COLLECTIONS.CALLS));
     const callId = callDocRef.id;
     
-    // Helper to ensure no undefined values
     const safeUserPhoto = user.photoURL || null;
 
     const callData: CallSession = {
@@ -237,18 +249,11 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       type,
       status: CallStatus.OFFERING,
       startedAt: Date.now(),
+      activeSpeakerId: null,
     };
 
     const firestoreData = {
-        callId,
-        callerId: user.uid,
-        callerName: user.displayName || 'Unknown',
-        callerPhoto: safeUserPhoto,
-        calleeId,
-        calleeName,
-        type,
-        status: CallStatus.OFFERING,
-        startedAt: Date.now(),
+        ...callData,
         offer: { type: offer.type, sdp: offer.sdp }
     };
 
@@ -272,6 +277,11 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
     // 1. Get Local Stream
     const stream = await rtcRef.current.startLocalStream(incomingCall.type === CallType.VIDEO);
     setLocalStream(stream);
+
+    // CRITICAL: Mute immediately for PTT answer
+    if (incomingCall.type === CallType.PTT) {
+        rtcRef.current.toggleAudio(false);
+    }
 
     // 2. Get the Offer from DB
     const callDocRef = doc(db, COLLECTIONS.CALLS, incomingCall.callId);
@@ -305,6 +315,25 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setIncomingCall(null);
         setCallStatus(CallStatus.CONNECTED);
     }
+  };
+
+  // Toggle PTT Transmission
+  const toggleTalk = async (isTalking: boolean) => {
+      if (!rtcRef.current || !activeCall || !db || !user) return;
+      
+      // 1. Audio Control (Instant)
+      rtcRef.current.toggleAudio(isTalking);
+
+      // 2. Visual Signaling (Firestore Latency ~500ms but persistent)
+      // Only update if state actually changes to save writes
+      try {
+          const callRef = doc(db, COLLECTIONS.CALLS, activeCall.callId);
+          await updateDoc(callRef, {
+              activeSpeakerId: isTalking ? user.uid : null
+          });
+      } catch (e) {
+          console.error("Error signaling talk state", e);
+      }
   };
 
   const cleanupCall = () => {
@@ -362,6 +391,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({ children
       answerCall,
       rejectCall,
       endCall,
+      toggleTalk,
       remoteStream,
       localStream,
       playTone,

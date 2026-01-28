@@ -1,20 +1,26 @@
-import React, { useState, useEffect, useRef } from 'react';
+
+import React, { useState, useEffect } from 'react';
 import { useCall } from '../context/CallContext';
 import { CallStatus, CallType, UserProfile } from '../types';
-import { Radio, Zap, Volume2, User as UserIcon } from 'lucide-react';
+import { Radio, Volume2, User as UserIcon, Loader2 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { collection, query, limit, getDocs } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { DEFAULT_AVATAR } from '../constants';
 
 const WalkieTalkie: React.FC = () => {
-    const { makeCall, endCall, activeCall, callStatus, incomingCall, ensureAudioContext } = useCall();
+    const { 
+        makeCall, endCall, toggleTalk, activeCall, 
+        callStatus, incomingCall, ensureAudioContext 
+    } = useCall();
     const { user } = useAuth();
+    
     const [selectedFriend, setSelectedFriend] = useState<UserProfile | null>(null);
     const [users, setUsers] = useState<UserProfile[]>([]);
-    const [isTalking, setIsTalking] = useState(false);
+    const [isHoldingButton, setIsHoldingButton] = useState(false);
     const [isReady, setIsReady] = useState(false); // Used to unlock audio context
 
+    // 1. Fetch Users
     useEffect(() => {
         if (!db) return;
         const fetchUsers = async () => {
@@ -31,35 +37,58 @@ const WalkieTalkie: React.FC = () => {
         fetchUsers();
     }, [user]);
 
-    // Handle "Receive" state visually
-    const isReceiving = incomingCall?.type === CallType.PTT && callStatus === CallStatus.CONNECTED;
-    const currentFriendId = isReceiving ? incomingCall?.callerId : selectedFriend?.uid;
+    // 2. Auto-Connect Logic
+    // When a friend is selected, ensure we are connected to them
+    useEffect(() => {
+        if (!selectedFriend || !user || !isReady) return;
+
+        // If we are already connected to someone else, end it
+        if (activeCall && activeCall.activeSpeakerId === undefined && (activeCall.calleeId !== selectedFriend.uid && activeCall.callerId !== selectedFriend.uid)) {
+            endCall();
+        }
+
+        // Check if we need to start a new connection
+        // We only start if no active call exists, or if the active call is ended
+        const isConnectedToFriend = activeCall && 
+            (activeCall.calleeId === selectedFriend.uid || activeCall.callerId === selectedFriend.uid) &&
+            (callStatus === CallStatus.CONNECTED || callStatus === CallStatus.OFFERING);
+
+        // Don't auto-call if we are receiving an incoming call from someone else
+        if (!isConnectedToFriend && !incomingCall && callStatus === CallStatus.ENDED) {
+            console.log("Auto-connecting to", selectedFriend.displayName);
+            makeCall(selectedFriend.uid, selectedFriend.displayName, CallType.PTT);
+        }
+    }, [selectedFriend, isReady, activeCall, callStatus, incomingCall]);
+
+
+    // Determine UI State
+    const isConnected = callStatus === CallStatus.CONNECTED;
+    const isConnecting = callStatus === CallStatus.OFFERING || callStatus === CallStatus.RINGING;
+    
+    // Remote talking state comes from Firestore metadata now
+    const isRemoteTalking = activeCall?.activeSpeakerId && activeCall.activeSpeakerId !== user?.uid;
+    const isLocalTalking = isHoldingButton; // Immediate feedback
 
     // Find the friend object for the current interaction
+    const currentFriendId = activeCall ? (activeCall.callerId === user?.uid ? activeCall.calleeId : activeCall.callerId) : selectedFriend?.uid;
     const activeFriend = users.find(u => u.uid === currentFriendId) || selectedFriend;
 
-    const handleTouchStart = async (e: React.TouchEvent | React.MouseEvent) => {
+    // Interaction Handlers
+    const handleTouchStart = (e: React.TouchEvent | React.MouseEvent) => {
         e.preventDefault();
-        if (!selectedFriend || isReceiving) return;
+        if (!isConnected || isRemoteTalking) return;
         
-        // Vibration feedback
         if (navigator.vibrate) navigator.vibrate(50);
-
-        setIsTalking(true);
-        try {
-            await makeCall(selectedFriend.uid, selectedFriend.displayName, CallType.PTT);
-        } catch (e) {
-            console.error(e);
-            setIsTalking(false);
-        }
+        setIsHoldingButton(true);
+        toggleTalk(true);
     };
 
-    const handleTouchEnd = async (e: React.TouchEvent | React.MouseEvent) => {
+    const handleTouchEnd = (e: React.TouchEvent | React.MouseEvent) => {
         e.preventDefault();
-        if (!isTalking) return;
+        if (!isHoldingButton) return;
         
-        setIsTalking(false);
-        await endCall();
+        setIsHoldingButton(false);
+        toggleTalk(false);
     };
 
     const activateApp = () => {
@@ -95,7 +124,7 @@ const WalkieTalkie: React.FC = () => {
                         return (
                             <button
                                 key={friend.uid}
-                                onClick={() => !isReceiving && !isTalking && setSelectedFriend(friend)}
+                                onClick={() => setSelectedFriend(friend)}
                                 className={`flex flex-col items-center space-y-1 min-w-[70px] snap-center transition-opacity ${isSelected ? 'opacity-100' : 'opacity-50 grayscale'}`}
                             >
                                 <div className={`w-14 h-14 rounded-full p-0.5 ${isSelected ? 'bg-gradient-to-tr from-primary to-accent' : 'bg-gray-700'}`}>
@@ -119,31 +148,37 @@ const WalkieTalkie: React.FC = () => {
                 
                 {/* Status Indicator */}
                 <div className="absolute top-10 flex items-center space-x-2">
-                    {isTalking ? (
+                    {isLocalTalking ? (
                         <span className="text-accent font-black tracking-widest animate-pulse flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-accent"></div> TRANSMITTING
                         </span>
-                    ) : isReceiving ? (
+                    ) : isRemoteTalking ? (
                         <span className="text-green-500 font-black tracking-widest animate-pulse flex items-center gap-2">
                             <div className="w-2 h-2 rounded-full bg-green-500"></div> RECEIVING
                         </span>
+                    ) : isConnecting ? (
+                        <span className="text-blue-400 font-bold tracking-widest text-xs flex items-center gap-2">
+                            <Loader2 size={12} className="animate-spin"/> CONNECTING...
+                        </span>
+                    ) : isConnected ? (
+                        <span className="text-gray-500 font-bold tracking-widest text-xs">READY • HOLD TO TALK</span>
                     ) : (
-                        <span className="text-gray-600 font-bold tracking-widest text-xs">HOLD TO TALK</span>
+                         <span className="text-gray-600 font-bold tracking-widest text-xs">OFFLINE</span>
                     )}
                 </div>
 
                 {/* Main Avatar / Visualizer */}
                 <div className="relative mb-8">
                      {/* Ripples */}
-                    {(isTalking || isReceiving) && (
+                    {(isLocalTalking || isRemoteTalking) && (
                         <>
-                            <div className={`absolute inset-0 rounded-full animate-ping opacity-20 ${isReceiving ? 'bg-green-500' : 'bg-accent'}`}></div>
-                            <div className={`absolute -inset-4 rounded-full animate-pulse opacity-10 ${isReceiving ? 'bg-green-500' : 'bg-accent'}`}></div>
+                            <div className={`absolute inset-0 rounded-full animate-ping opacity-20 ${isRemoteTalking ? 'bg-green-500' : 'bg-accent'}`}></div>
+                            <div className={`absolute -inset-4 rounded-full animate-pulse opacity-10 ${isRemoteTalking ? 'bg-green-500' : 'bg-accent'}`}></div>
                         </>
                     )}
 
                     <div className={`w-64 h-64 rounded-[3rem] overflow-hidden border-8 shadow-2xl transition-all duration-200 
-                        ${isTalking ? 'border-accent scale-105' : isReceiving ? 'border-green-500 scale-105' : 'border-gray-800'}`
+                        ${isLocalTalking ? 'border-accent scale-105' : isRemoteTalking ? 'border-green-500 scale-105' : 'border-gray-800'}`
                     }>
                         {activeFriend ? (
                             <img 
@@ -168,21 +203,20 @@ const WalkieTalkie: React.FC = () => {
                     </div>
                 </div>
 
-                {/* Big Trigger Button (Invisible but covers area) */}
-                <div 
-                    className="absolute inset-0 z-10"
-                    onMouseDown={handleTouchStart}
-                    onMouseUp={handleTouchEnd}
-                    onMouseLeave={handleTouchEnd}
-                    onTouchStart={handleTouchStart}
-                    onTouchEnd={handleTouchEnd}
-                ></div>
+                {/* Big Trigger Button (Invisible but covers area) - Only active when connected */}
+                {isConnected && (
+                    <div 
+                        className="absolute inset-0 z-10 cursor-pointer"
+                        onMouseDown={handleTouchStart}
+                        onMouseUp={handleTouchEnd}
+                        onMouseLeave={handleTouchEnd}
+                        onTouchStart={handleTouchStart}
+                        onTouchEnd={handleTouchEnd}
+                    ></div>
+                )}
 
                 {/* Helper Text */}
                 <div className="mt-auto mb-10 text-gray-500 flex items-center gap-2 pointer-events-none">
-                     {callStatus === CallStatus.OFFERING && isTalking && (
-                         <span className="text-xs">Connecting...</span>
-                     )}
                      <Volume2 size={16} />
                      <span className="text-xs font-mono">SPEAKER ON</span>
                 </div>

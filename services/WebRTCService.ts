@@ -1,3 +1,4 @@
+
 import { STUN_SERVERS } from '../constants';
 
 type SignalCallback = (data: any) => void;
@@ -53,6 +54,14 @@ export class WebRTCService {
     } catch (error) {
       console.error("Error accessing media devices:", error);
       throw error;
+    }
+  }
+
+  public toggleAudio(enabled: boolean) {
+    if (this.localStream) {
+      this.localStream.getAudioTracks().forEach(track => {
+        track.enabled = enabled;
+      });
     }
   }
 
