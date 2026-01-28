@@ -1,19 +1,28 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { User, onAuthStateChanged, signInAnonymously, updateProfile, getAuth } from 'firebase/auth';
-import { doc, setDoc, serverTimestamp, getFirestore } from 'firebase/firestore';
+import { 
+  User, 
+  onAuthStateChanged, 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  updateProfile, 
+  signOut as fbSignOut 
+} from 'firebase/auth';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 import { auth, db } from '../services/firebase';
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
-  signInAnon: (name: string) => Promise<void>;
+  login: (email: string, pass: string) => Promise<void>;
+  register: (email: string, pass: string, name: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
   loading: true,
-  signInAnon: async () => {},
+  login: async () => {},
+  register: async () => {},
   signOut: async () => {},
 });
 
@@ -32,14 +41,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
         setUser(firebaseUser);
-        // Update presence
+        // Update presence and ensure user document exists
         if (db) {
             try {
                 await setDoc(doc(db, 'users', firebaseUser.uid), {
                     uid: firebaseUser.uid,
-                    displayName: firebaseUser.displayName || 'Anonymous',
+                    displayName: firebaseUser.displayName || 'Unknown',
                     email: firebaseUser.email,
-                    photoURL: firebaseUser.photoURL,
+                    photoURL: firebaseUser.photoURL || null,
                     lastActive: serverTimestamp(),
                 }, { merge: true });
             } catch (e) {
@@ -55,27 +64,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return unsubscribe;
   }, []);
 
-  const signInAnon = async (name: string) => {
+  const login = async (email: string, pass: string) => {
     if (!auth) throw new Error("Firebase Auth not initialized");
-    try {
-        const result = await signInAnonymously(auth);
-        if (result.user) {
-            await updateProfile(result.user, { displayName: name });
-            setUser({ ...result.user, displayName: name }); // Force update local state to reflect name immediately
+    await signInWithEmailAndPassword(auth, email, pass);
+  };
+
+  const register = async (email: string, pass: string, name: string) => {
+    if (!auth) throw new Error("Firebase Auth not initialized");
+    const result = await createUserWithEmailAndPassword(auth, email, pass);
+    if (result.user) {
+        await updateProfile(result.user, { displayName: name });
+        // Trigger manual state update to reflect name immediately
+        setUser({ ...result.user, displayName: name });
+        
+        // Create initial user doc
+        if (db) {
+            await setDoc(doc(db, 'users', result.user.uid), {
+                uid: result.user.uid,
+                displayName: name,
+                email: email,
+                photoURL: null,
+                lastActive: serverTimestamp(),
+            });
         }
-    } catch (e) {
-        console.error("Error signing in", e);
-        throw e;
     }
   };
 
   const signOut = async () => {
     if (!auth) return;
-    await auth.signOut();
+    await fbSignOut(auth);
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signInAnon, signOut }}>
+    <AuthContext.Provider value={{ user, loading, login, register, signOut }}>
       {children}
     </AuthContext.Provider>
   );

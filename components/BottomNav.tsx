@@ -15,7 +15,7 @@ const BottomNav: React.FC<Props> = ({ currentPage, onNavigate }) => {
   ];
 
   return (
-    <div className="fixed bottom-0 left-0 w-full bg-secondary border-t border-gray-700 pb-safe">
+    <div className="fixed bottom-0 left-0 w-full bg-secondary border-t border-gray-700 pb-safe z-50">
       <div className="flex justify-around items-center h-16">
         {navItems.map((item) => (
           <button

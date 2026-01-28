@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { collection, query, where, orderBy, limit, getDocs } from 'firebase/firestore';
+import { collection, query, where, limit, getDocs } from 'firebase/firestore';
 import { db } from '../services/firebase';
 import { useAuth } from '../context/AuthContext';
 import { useCall } from '../context/CallContext';
 import { CallSession, CallStatus, CallType } from '../types';
 import { COLLECTIONS, DEFAULT_AVATAR } from '../constants';
-import { PhoneIncoming, PhoneOutgoing, PhoneMissed, Video, Phone } from 'lucide-react';
+import { PhoneIncoming, PhoneOutgoing, PhoneMissed, Phone } from 'lucide-react';
 
 const CallHistory: React.FC = () => {
   const { user } = useAuth();
@@ -23,20 +23,16 @@ const CallHistory: React.FC = () => {
       try {
         const callsRef = collection(db, COLLECTIONS.CALLS);
 
-        // Firestore requires composite indexes for complex queries.
-        // To keep this "Zero Config" friendly, we perform simple queries and merge in JS.
-        
+        // Simple queries without orderBy to avoid index issues with security rules
         const q1 = query(
             callsRef,
             where('callerId', '==', user.uid),
-            orderBy('startedAt', 'desc'),
             limit(20)
         );
             
         const q2 = query(
             callsRef,
             where('calleeId', '==', user.uid),
-            orderBy('startedAt', 'desc'),
             limit(20)
         );
 
@@ -47,7 +43,7 @@ const CallHistory: React.FC = () => {
             ...snap2.docs.map(d => d.data() as CallSession)
         ].sort((a, b) => b.startedAt - a.startedAt);
 
-        // Deduplicate if needed (though unlikely with these specific queries unless self-calling)
+        // Deduplicate
         const uniqueCalls = combined.filter((v,i,a)=>a.findIndex(v2=>(v2.callId===v.callId))===i);
 
         setCalls(uniqueCalls);
@@ -84,7 +80,7 @@ const CallHistory: React.FC = () => {
         const isMissed = call.status === CallStatus.MISSED || call.status === CallStatus.REJECTED;
         const otherPartyName = isIncoming ? call.callerName : call.calleeName;
         const otherPartyId = isIncoming ? call.callerId : call.calleeId;
-        const otherPartyPhoto = isIncoming ? call.callerPhoto : undefined; // Simplified
+        const otherPartyPhoto = isIncoming ? call.callerPhoto : undefined;
 
         return (
           <div key={call.callId} className="flex items-center justify-between bg-card p-4 rounded-xl shadow-sm border border-gray-800">

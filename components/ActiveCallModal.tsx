@@ -26,6 +26,11 @@ const ActiveCallModal: React.FC = () => {
     }
   }, [remoteStream, localStream, callStatus]);
 
+  // Don't show modal for PTT calls (handled inline in WalkieTalkie.tsx)
+  if (incomingCall?.type === CallType.PTT || activeCall?.type === CallType.PTT) {
+      return null;
+  }
+
   if (!incomingCall && (!activeCall || callStatus === CallStatus.ENDED)) {
     return null;
   }
@@ -33,7 +38,7 @@ const ActiveCallModal: React.FC = () => {
   // Incoming Call Screen
   if (incomingCall) {
     return (
-      <div className="fixed inset-0 z-50 bg-dark/95 flex flex-col items-center justify-center space-y-8 animate-in fade-in">
+      <div className="fixed inset-0 z-50 bg-dark/95 flex flex-col items-center justify-center space-y-8 animate-in fade-in safe-area-top safe-area-bottom">
         <div className="text-center space-y-4">
           <div className="w-24 h-24 rounded-full bg-gray-700 mx-auto overflow-hidden border-4 border-gray-600">
              {incomingCall.callerPhoto ? (
@@ -68,7 +73,7 @@ const ActiveCallModal: React.FC = () => {
   const isVideo = activeCall?.type === CallType.VIDEO;
 
   return (
-    <div className="fixed inset-0 z-50 bg-gray-900 flex flex-col">
+    <div className="fixed inset-0 z-50 bg-gray-900 flex flex-col safe-area-top safe-area-bottom">
       {/* Video Area */}
       <div className="flex-1 relative bg-black">
         {isVideo && (
@@ -93,8 +98,11 @@ const ActiveCallModal: React.FC = () => {
         {!isVideo && (
              <div className="absolute inset-0 flex flex-col items-center justify-center space-y-6">
                 <div className="w-32 h-32 rounded-full bg-gray-700 border-4 border-primary flex items-center justify-center overflow-hidden">
-                    {/* Placeholder for audio visualization */}
-                    <div className="animate-pulse w-full h-full bg-primary/20"></div>
+                    {activeCall?.callerPhoto ? (
+                        <img src={activeCall.callerPhoto} className="w-full h-full object-cover" />
+                    ) : (
+                        <div className="animate-pulse w-full h-full bg-primary/20"></div>
+                    )}
                 </div>
                 <div className="text-center">
                     <h2 className="text-2xl font-bold text-white">{activeCall?.calleeName || activeCall?.callerName}</h2>

@@ -11,9 +11,9 @@ const firebaseConfig = {
   appId: "1:132301633320:web:a26589c3e86831645fc21d"
 };
 
-let app: FirebaseApp | undefined;
-let auth: Auth | undefined;
-let db: Firestore | undefined;
+let app: FirebaseApp;
+let auth: Auth;
+let db: Firestore;
 
 try {
     app = initializeApp(firebaseConfig);
@@ -23,12 +23,5 @@ try {
     console.error("Failed to initialize firebase", e);
 }
 
-// No-ops for compatibility with existing imports
-export const saveConfig = (config: any) => {
-    console.log("Configuration is hardcoded. Received:", config);
-};
-export const clearConfig = () => {
-    console.warn("Configuration is hardcoded and cannot be cleared.");
-};
-
+// Export specific instances
 export { app, auth, db };
