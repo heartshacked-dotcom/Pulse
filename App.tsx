@@ -1,13 +1,13 @@
-
 import React, { useState, useEffect, useRef } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
-import { CallProvider, useCall } from "./context/CallContext";
+import { useCall, CallProvider } from "./context/CallContext";
 import Login from "./pages/Login";
 import BottomNav from "./components/BottomNav";
 import WalkieTalkie from "./pages/WalkieTalkie";
 import { User, LogOut, Copy, UserPlus, Check, X, Mail, ShieldCheck, Zap, Radio, Bell, AlertTriangle, Camera } from "lucide-react";
 import { collection, query, where, getDocs, addDoc, onSnapshot, doc, updateDoc, deleteDoc, setDoc } from "firebase/firestore";
-import { db } from "./services/firebase";
+import { ref, onValue, onDisconnect, set, serverTimestamp } from "firebase/database";
+import { db, rtdb } from "./services/firebase";
 import { FriendRequest } from "./types";
 
 const GlobalAudioSink: React.FC = () => {
@@ -73,7 +73,11 @@ const ProfilePage: React.FC = () => {
 
       // Check if already friends
       const friendshipId1 = [user.uid, target.uid].sort().join("_");
-      const fSnap = await getDocs(query(collection(db, "friendships"), where("__name__", "==", friendshipId1))); 
+      const fSnapDocs = await getDocs(query(collection(db, "friendships"), where("__name__", "==", friendshipId1)));
+      
+      if (!fSnapDocs.empty) {
+        throw new Error("Already connected.");
+      }
       
       // Simpler check for existing requests
       const existingReq = await getDocs(query(
@@ -216,7 +220,7 @@ const ProfilePage: React.FC = () => {
         </button>
         <button 
           onClick={() => setActiveTab('add')}
-          className={`flex-1 py-3 rounded-2xl text-xs font-black uppercase tracking-wider transition-all border ${activeTab === 'add' ? 'bg-primaryQH border-primary text-white bg-indigo-600 shadow-lg shadow-indigo-500/20' : 'bg-slate-900 border-slate-800 text-slate-400'}`}
+          className={`flex-1 py-3 rounded-2xl text-xs font-black uppercase tracking-wider transition-all border ${activeTab === 'add' ? 'bg-indigo-600 border-indigo-500 text-white shadow-lg shadow-indigo-500/20' : 'bg-slate-900 border-slate-800 text-slate-400'}`}
         >
           Connect
         </button>
@@ -408,26 +412,36 @@ const ProfilePage: React.FC = () => {
 };
 
 const AppContent: React.FC = () => {
-  const { user, loading, userData } = useAuth();
+  const { user, loading } = useAuth();
   const [page, setPage] = useState("ptt");
 
-  // HEARTBEAT: Keep user online
+  // PRESENCE SYSTEM (RTDB)
   useEffect(() => {
-    if (!user || !db) return;
-    
-    const sendHeartbeat = async () => {
-       try {
-         await updateDoc(doc(db, 'users', user.uid), {
-            lastActive: Date.now()
-         });
-       } catch (e) {
-         // ignore silent fails
-       }
-    };
+    if (!user || !rtdb) return;
 
-    sendHeartbeat();
-    const interval = setInterval(sendHeartbeat, 60000); // 1 min
-    return () => clearInterval(interval);
+    // Reference to the special '.info/connected' path
+    const connectedRef = ref(rtdb, '.info/connected');
+    const userStatusRef = ref(rtdb, `status/${user.uid}`);
+
+    const unsubscribe = onValue(connectedRef, (snap) => {
+       if (snap.val() === true) {
+          // When we connect, set up the disconnect hook first
+          onDisconnect(userStatusRef).set({
+             state: 'offline',
+             lastChanged: serverTimestamp()
+          }).then(() => {
+             // Then set online status
+             set(userStatusRef, {
+                state: 'online',
+                lastChanged: serverTimestamp()
+             });
+          });
+       }
+    });
+
+    return () => {
+       unsubscribe();
+    }
   }, [user]);
 
   if (loading)

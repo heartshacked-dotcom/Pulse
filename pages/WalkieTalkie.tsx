@@ -15,7 +15,8 @@ import {
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { collection, query, where, onSnapshot, doc, getDoc } from "firebase/firestore";
-import { db } from "../services/firebase";
+import { ref, onValue, off } from "firebase/database";
+import { db, rtdb } from "../services/firebase";
 import { DEFAULT_AVATAR } from "../constants";
 
 const WalkieTalkie: React.FC = () => {
@@ -42,34 +43,14 @@ const WalkieTalkie: React.FC = () => {
 
   const prevFriendIdRef = useRef<string | null>(null);
 
-  // 1. Fetch Friends & Realtime Status
+  // 1. Fetch Friends (Firestore) & Realtime Status (RTDB)
   useEffect(() => {
-    if (!db || !user) return;
+    if (!db || !user || !rtdb) return;
 
     const q1 = query(collection(db, "friendships"), where("userA", "==", user.uid));
     const q2 = query(collection(db, "friendships"), where("userB", "==", user.uid));
 
-    const handleFriendSnaps = async (snapshot: any) => {
-      const friendIds = snapshot.docs.map((d: any) => {
-        const data = d.data();
-        return data.userA === user.uid ? data.userB : data.userA;
-      });
-
-      const friendProfiles: UserProfile[] = [];
-      for (const fid of friendIds) {
-        const snap = await getDoc(doc(db, "users", fid));
-        if (snap.exists()) {
-          friendProfiles.push(snap.data() as UserProfile);
-        }
-      }
-      return friendProfiles;
-    };
-
-    // Use a function to reload friends periodically or just listen to friendships
-    // For simplicity in this demo, we load profiles once on friendship change.
-    // In a real app, you'd listen to 'users' collection for presence updates.
-    // Here we will check lastActive periodically.
-    
+    // Helper to load profiles
     const updateFriends = async (ids: string[]) => {
        const profiles: UserProfile[] = [];
        for(const id of ids) {
@@ -80,20 +61,32 @@ const WalkieTalkie: React.FC = () => {
     };
 
     let friendIds = new Set<string>();
+    
+    // Track status listeners to clean them up
+    const statusUnsubscribes: (() => void)[] = [];
 
     const updateList = async () => {
        const profiles = await updateFriends(Array.from(friendIds));
        setFriends(profiles);
        setLoadingFriends(false);
        
-       // Update online status map
-       const now = Date.now();
-       const statusMap: Record<string, boolean> = {};
+       // Setup Presence Listeners for these friends in RTDB
+       // Clear old listeners first
+       statusUnsubscribes.forEach(unsub => unsub());
+       statusUnsubscribes.length = 0;
+
        profiles.forEach(p => {
-          // Fix TS error: ensure explicit boolean result
-          statusMap[p.uid] = !!p.lastActive && (now - p.lastActive < 120000); // 2 mins threshold
+           const statusRef = ref(rtdb, `status/${p.uid}`);
+           const unsub = onValue(statusRef, (snap) => {
+               const val = snap.val();
+               const isOnline = val?.state === 'online';
+               setOnlineStatus(prev => ({
+                   ...prev,
+                   [p.uid]: isOnline
+               }));
+           });
+           statusUnsubscribes.push(() => off(statusRef, 'value', unsub));
        });
-       setOnlineStatus(statusMap);
     };
 
     const unsub1 = onSnapshot(q1, (snap) => {
@@ -105,13 +98,10 @@ const WalkieTalkie: React.FC = () => {
        updateList();
     });
     
-    // Poll for status updates every 30s
-    const pollInterval = setInterval(updateList, 30000);
-
     return () => {
       unsub1();
       unsub2();
-      clearInterval(pollInterval);
+      statusUnsubscribes.forEach(unsub => unsub());
     };
   }, [user?.uid]);
 

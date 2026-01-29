@@ -8,31 +8,38 @@ service cloud.firestore {
       return request.auth != null;
     }
     
-    // Users
+    // Users: Profiles are strictly structured
     match /users/{userId} {
       allow read: if isSignedIn();
+      // Users can only update their own profile (photo, lastActive, etc)
       allow write: if isSignedIn() && request.auth.uid == userId;
     }
 
-    // Friend Requests
+    // Friend Requests: Relational data
     match /friendRequests/{requestId} {
+      // Allow creating a request if you are the sender
       allow create: if isSignedIn() && request.resource.data.fromUid == request.auth.uid;
+      
+      // Allow reading if you are the sender OR the receiver
       allow read: if isSignedIn() && (
         resource.data.fromUid == request.auth.uid || 
         resource.data.toUid == request.auth.uid
       );
+      
+      // Allow delete (cancel/reject) if involved
       allow delete, update: if isSignedIn() && (
         resource.data.fromUid == request.auth.uid || 
         resource.data.toUid == request.auth.uid
       );
     }
 
-    // Friendships
+    // Friendships: Established connections
     match /friendships/{friendshipId} {
       allow read: if isSignedIn() && (
         resource.data.userA == request.auth.uid || 
         resource.data.userB == request.auth.uid
       );
+      // Friendships are usually created by server or transaction, but client creation is allowed here for simplicity
       allow create: if isSignedIn() && (
         request.resource.data.userA == request.auth.uid || 
         request.resource.data.userB == request.auth.uid
@@ -43,23 +50,21 @@ service cloud.firestore {
       );
     }
 
-    // Calls - Single Document Signaling
+    // Call History: Archived logs of completed calls
+    // Note: Active signaling happens in Realtime Database, this is just for the record
     match /calls/{callId} {
-      // Allow creation if you are the caller
-      allow create: if isSignedIn() && request.resource.data.callerId == request.auth.uid;
+      allow create: if isSignedIn() && (
+        request.resource.data.callerId == request.auth.uid || 
+        request.resource.data.calleeId == request.auth.uid
+      );
       
-      // Allow read/update if you are the caller OR the callee
-      // Note: We check resource.data (existing doc) for updates
-      allow read, update: if isSignedIn() && (
+      allow read: if isSignedIn() && (
         resource.data.callerId == request.auth.uid || 
         resource.data.calleeId == request.auth.uid
       );
       
-      // Allow delete (cleanup)
-      allow delete: if isSignedIn() && (
-        resource.data.callerId == request.auth.uid || 
-        resource.data.calleeId == request.auth.uid
-      );
+      // History logs are immutable
+      allow update, delete: if false; 
     }
   }
 }

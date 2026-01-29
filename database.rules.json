@@ -1,22 +1,15 @@
 
 {
   "rules": {
-    "users": {
+    "calls": {
       ".read": "auth != null",
-      "$uid": {
-        ".write": "auth != null && auth.uid == $uid",
-        "presence": {
-          ".validate": "newData.isString() && (newData.val() == 'online' || newData.val() == 'offline')"
-        },
-        "lastSeen": {
-          ".validate": "newData.isNumber() && newData.val() <= now"
-        }
-      }
+      ".write": "auth != null",
+      ".indexOn": ["calleeId"]
     },
-    "presence": {
+    "status": {
       ".read": "auth != null",
       "$uid": {
-        ".write": "auth != null && auth.uid == $uid"
+        ".write": "auth != null && auth.uid === $uid"
       }
     }
   }

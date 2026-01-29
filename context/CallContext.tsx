@@ -7,22 +7,19 @@ import React, {
   useRef,
 } from "react";
 import {
-  collection,
-  doc,
-  addDoc,
-  updateDoc,
-  onSnapshot,
+  ref,
   query,
-  where,
-  setDoc,
-  getDoc,
-  deleteDoc,
-} from "firebase/firestore";
-import { db } from "../services/firebase";
+  orderByChild,
+  equalTo,
+  onValue,
+  update,
+  off,
+  get
+} from "firebase/database";
+import { db, rtdb } from "../services/firebase";
 import { useAuth } from "./AuthContext";
 import { CallSession, CallStatus, CallType } from "../types";
 import { WebRTCService } from "../services/WebRTCService";
-import { COLLECTIONS } from "../constants";
 
 interface CallContextType {
   activeCall: CallSession | null;
@@ -58,9 +55,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
 
   const rtcRef = useRef<WebRTCService | null>(null);
-  const callUnsubRef = useRef<(() => void) | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
+
+  // RTDB Listener references for cleanup
+  const incomingListenerRef = useRef<{ ref: any, cb: any } | null>(null);
+  const activeCallListenerRef = useRef<{ ref: any, cb: any } | null>(null);
 
   const statusRef = useRef<CallStatus>(CallStatus.ENDED);
   const activeCallRef = useRef<CallSession | null>(null);
@@ -131,41 +131,59 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     osc.stop(ctx.currentTime + 0.2);
   };
 
+  // LISTEN FOR INCOMING CALLS (RTDB)
   useEffect(() => {
-    if (!user || !db) return;
-    const q = query(
-      collection(db, COLLECTIONS.CALLS),
-      where("calleeId", "==", user.uid),
-      where("status", "==", CallStatus.OFFERING),
+    if (!user || !rtdb) return;
+    
+    // Query calls where calleeId == user.uid
+    // Note: This requires indexing on 'calleeId' in Firebase Rules for efficiency,
+    // but works in dev without it (with warnings).
+    const callsRef = query(
+        ref(rtdb, 'calls'), 
+        orderByChild('calleeId'), 
+        equalTo(user.uid)
     );
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
-        if (change.type === "added") {
-          const data = change.doc.data() as CallSession;
-          if (statusRef.current === CallStatus.ENDED) {
-            setIncomingCall(data);
-            setCallStatus(CallStatus.RINGING);
-          } else if (data.callId !== activeCallRef.current?.callId) {
-            await updateDoc(doc(db, COLLECTIONS.CALLS, data.callId), {
-              status: "BUSY",
-            });
+    const cb = onValue(callsRef, (snapshot) => {
+       const calls = snapshot.val();
+       if (!calls) return;
+
+       Object.values(calls).forEach((data: any) => {
+          if (data.status === 'OFFERING') {
+             // Found an incoming call
+             if (statusRef.current === CallStatus.ENDED) {
+                setIncomingCall(data as CallSession);
+                setCallStatus(CallStatus.RINGING);
+             } else if (data.callId !== activeCallRef.current?.callId) {
+                // Busy - reject implicitly or explicitly
+                // For now, we ignore
+             }
           }
-        }
-      });
+       });
     });
-    return () => unsubscribe();
+
+    incomingListenerRef.current = { ref: callsRef, cb };
+
+    return () => {
+       off(callsRef, 'value', cb);
+    };
   }, [user?.uid]);
 
+  // MONITOR ACTIVE CALL (RTDB)
   useEffect(() => {
-    if (!activeCall || !db || !user) return;
-    const callDocRef = doc(db, COLLECTIONS.CALLS, activeCall.callId);
+    if (!activeCall || !rtdb) return;
+    const callRef = ref(rtdb, `calls/${activeCall.callId}`);
 
-    const unsubStatus = onSnapshot(callDocRef, async (snapshot) => {
-      const data = snapshot.data();
-      if (!data) return;
+    const cb = onValue(callRef, (snapshot) => {
+      const data = snapshot.val();
+      
+      // If data is null, the call was deleted (ended)
+      if (!data) {
+        cleanupCall();
+        return;
+      }
 
-      if (data.status === CallStatus.CONNECTED && statusRef.current !== CallStatus.CONNECTED) {
+      if (data.status === 'CONNECTED' && statusRef.current !== CallStatus.CONNECTED) {
         setCallStatus(CallStatus.CONNECTED);
         playTone("ON");
       }
@@ -176,31 +194,24 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
         );
       }
 
-      if (["ENDED", "REJECTED", "BUSY"].includes(data.status)) {
+      if (["ENDED", "REJECTED"].includes(data.status)) {
         cleanupCall();
       }
     });
 
-    callUnsubRef.current = () => unsubStatus();
-    return () => { if (callUnsubRef.current) callUnsubRef.current(); };
-  }, [activeCall?.callId, user?.uid]);
+    activeCallListenerRef.current = { ref: callRef, cb };
+    return () => { off(callRef, 'value', cb); };
+  }, [activeCall?.callId]);
 
   const makeCall = async (calleeId: string, calleeName: string) => {
-    if (!user || !db || !rtcRef.current) return;
+    if (!user || !rtdb || !rtcRef.current) return;
     
-    // Critical: check ref to prevent race condition when switching users rapidly
-    if (statusRef.current !== CallStatus.ENDED) {
-       console.warn("Attempted to make call while not in ENDED state");
-       return; 
-    }
-    
+    if (statusRef.current !== CallStatus.ENDED) return;
     ensureAudioContext();
 
     try {
       const stream = await rtcRef.current.setupLocalMedia();
       setLocalStream(stream);
-
-      // Mute audio by default for PTT
       stream.getAudioTracks().forEach((track) => (track.enabled = false));
 
       rtcRef.current.createPeerConnection((remoteStream) => {
@@ -239,12 +250,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     } catch (e) {
       console.error("Error making walkie call:", e);
       cleanupCall();
-      throw e; // Re-throw to let UI handle connection error state
+      throw e;
     }
   };
 
   const answerCall = async () => {
-    if (!incomingCall || !user || !db || !rtcRef.current) return;
+    if (!incomingCall || !user || !rtdb || !rtcRef.current) return;
     ensureAudioContext();
 
     try {
@@ -272,7 +283,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const toggleTalk = async (isTalking: boolean) => {
-    if (!activeCall || !db || !user || !localStream) return;
+    if (!activeCall || !rtdb || !user || !localStream) return;
     ensureAudioContext();
 
     localStream.getAudioTracks().forEach((track) => {
@@ -284,7 +295,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     }
 
     try {
-      await updateDoc(doc(db, COLLECTIONS.CALLS, activeCall.callId), {
+      // Direct RTDB update for low latency PTT
+      const callRef = ref(rtdb, `calls/${activeCall.callId}`);
+      await update(callRef, {
         activeSpeakerId: isTalking ? user.uid : null,
       });
     } catch (e) {
@@ -293,27 +306,23 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const cleanupCall = () => {
-    // 1. Synchronously reset state refs to allow immediate re-calls
     statusRef.current = CallStatus.ENDED;
     activeCallRef.current = null;
 
-    // 2. Trigger React state updates
     setCallStatus(CallStatus.ENDED);
     setActiveCall(null);
     setIncomingCall(null);
     setRemoteStream(null);
     setLocalStream(null);
 
-    // 3. Clean up subscriptions and WebRTC
-    if (callUnsubRef.current) {
-      callUnsubRef.current();
-      callUnsubRef.current = null;
+    if (activeCallListenerRef.current) {
+       off(activeCallListenerRef.current.ref, 'value', activeCallListenerRef.current.cb);
+       activeCallListenerRef.current = null;
     }
 
     if (rtcRef.current) {
       rtcRef.current.cleanup(activeCall?.callId || null);
       
-      // Re-initialize for next call
       rtcRef.current = new WebRTCService();
       rtcRef.current.createPeerConnection((stream) => {
         setRemoteStream(stream);
@@ -325,20 +334,22 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const endCall = async () => {
-    if (activeCall && db) {
-      await updateDoc(doc(db, COLLECTIONS.CALLS, activeCall.callId), {
-        status: CallStatus.ENDED,
-        endedAt: Date.now(),
-      }).catch(() => {});
+    if (activeCall && rtdb) {
+      // Mark as ended in RTDB. WebRTCService cleanup handles archiving.
+      const callRef = ref(rtdb, `calls/${activeCall.callId}`);
+      try {
+        await update(callRef, { status: "ENDED" });
+      } catch (e) {}
     }
     cleanupCall();
   };
 
   const rejectCall = async () => {
-    if (incomingCall && db) {
-      await updateDoc(doc(db, COLLECTIONS.CALLS, incomingCall.callId), {
-        status: "REJECTED",
-      }).catch(() => {});
+    if (incomingCall && rtdb) {
+      const callRef = ref(rtdb, `calls/${incomingCall.callId}`);
+      try {
+        await update(callRef, { status: "REJECTED" });
+      } catch (e) {}
     }
     setIncomingCall(null);
     setCallStatus(CallStatus.ENDED);
