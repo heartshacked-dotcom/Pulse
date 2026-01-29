@@ -74,13 +74,23 @@ const ProfilePage: React.FC = () => {
       }
 
       // 2. Check if already friends
-      // FIXED: Use getDoc instead of query. Querying by ID with where() fails security rules 
-      // if the rule checks resource.data but the query doesn't filter on that data.
-      const friendshipId1 = [user.uid, target.uid].sort().join("_");
-      const friendshipDocRef = doc(db, "friendships", friendshipId1);
-      const friendshipSnap = await getDoc(friendshipDocRef);
+      // FIXED: Using getDoc on a non-existent document causes permission error if rule relies on resource.data.
+      // Instead, we query using a filter that matches the security rule (userA==me OR userB==me).
+      // We determine A/B sorting client-side to make the specific query.
+      const [id1, id2] = [user.uid, target.uid].sort();
+      let friendshipQuery;
       
-      if (friendshipSnap.exists()) {
+      if (user.uid === id1) {
+          // I am userA, so I query for userA == me AND userB == them
+          friendshipQuery = query(collection(db, "friendships"), where("userA", "==", user.uid), where("userB", "==", target.uid));
+      } else {
+          // I am userB, so I query for userB == me AND userA == them
+          friendshipQuery = query(collection(db, "friendships"), where("userB", "==", user.uid), where("userA", "==", target.uid));
+      }
+
+      const friendshipSnap = await getDocs(friendshipQuery);
+      
+      if (!friendshipSnap.empty) {
         throw new Error("Already connected.");
       }
       
