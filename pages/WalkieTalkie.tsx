@@ -29,28 +29,28 @@ const WalkieTalkie: React.FC = () => {
     incomingCall,
     ensureAudioContext,
     answerCall,
+    isMediaReady
   } = useCall();
   const { user } = useAuth();
 
   const [selectedFriend, setSelectedFriend] = useState<UserProfile | null>(null);
   const [friends, setFriends] = useState<UserProfile[]>([]);
   const [isHoldingButton, setIsHoldingButton] = useState(false);
-  const [isReady, setIsReady] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [loadingFriends, setLoadingFriends] = useState(true);
   const [connectionError, setConnectionError] = useState(false);
   const [onlineStatus, setOnlineStatus] = useState<Record<string, boolean>>({});
+  
+  // Track the target friend to ensure we don't start call for old selection
+  const targetFriendIdRef = useRef<string | null>(null);
 
-  const prevFriendIdRef = useRef<string | null>(null);
-
-  // 1. Fetch Friends (Firestore) & Realtime Status (RTDB)
+  // 1. Fetch Friends & Status
   useEffect(() => {
     if (!db || !user || !rtdb) return;
 
     const q1 = query(collection(db, "friendships"), where("userA", "==", user.uid));
     const q2 = query(collection(db, "friendships"), where("userB", "==", user.uid));
 
-    // Helper to load profiles
     const updateFriends = async (ids: string[]) => {
        const profiles: UserProfile[] = [];
        for(const id of ids) {
@@ -61,8 +61,6 @@ const WalkieTalkie: React.FC = () => {
     };
 
     let friendIds = new Set<string>();
-    
-    // Track status listeners to clean them up
     const statusUnsubscribes: (() => void)[] = [];
 
     const updateList = async () => {
@@ -70,8 +68,6 @@ const WalkieTalkie: React.FC = () => {
        setFriends(profiles);
        setLoadingFriends(false);
        
-       // Setup Presence Listeners for these friends in RTDB
-       // Clear old listeners first
        statusUnsubscribes.forEach(unsub => unsub());
        statusUnsubscribes.length = 0;
 
@@ -80,10 +76,7 @@ const WalkieTalkie: React.FC = () => {
            const unsub = onValue(statusRef, (snap) => {
                const val = snap.val();
                const isOnline = val?.state === 'online';
-               setOnlineStatus(prev => ({
-                   ...prev,
-                   [p.uid]: isOnline
-               }));
+               setOnlineStatus(prev => ({ ...prev, [p.uid]: isOnline }));
            });
            statusUnsubscribes.push(() => off(statusRef, 'value', unsub));
        });
@@ -109,31 +102,59 @@ const WalkieTalkie: React.FC = () => {
   useEffect(() => {
     if (friends.length > 0 && !selectedFriend) {
       setSelectedFriend(friends[0]);
+      targetFriendIdRef.current = friends[0].uid;
     }
   }, [friends]);
 
-  // 3. Connection Logic
+  // 3. Main Switcher Logic
   useEffect(() => {
-    if (!selectedFriend || !user || !isReady || connectionError) return;
+    if (!selectedFriend || !user || !isMediaReady) return;
 
-    const isCurrentSessionWithFriend =
-      activeCall &&
-      (activeCall.calleeId === selectedFriend.uid || activeCall.callerId === selectedFriend.uid);
-
-    if (activeCall && !isCurrentSessionWithFriend && callStatus !== CallStatus.ENDED) {
-      endCall();
-      return; 
-    }
-
-    if (isCurrentSessionWithFriend && callStatus !== CallStatus.ENDED) return;
+    // Handle incoming calls implicitly via auto-answer if needed (handled in other effect)
     if (incomingCall) return;
 
-    if (selectedFriend.uid !== prevFriendIdRef.current || (!activeCall && callStatus === CallStatus.ENDED)) {
-       prevFriendIdRef.current = selectedFriend.uid;
-       makeCall(selectedFriend.uid, selectedFriend.displayName)
-          .catch(() => setConnectionError(true));
+    const currentActiveId = activeCall ? (activeCall.callerId === user.uid ? activeCall.calleeId : activeCall.callerId) : null;
+    const desiredId = selectedFriend.uid;
+
+    if (currentActiveId === desiredId) {
+        // Already connected to the right person
+        if (connectionError && callStatus === CallStatus.CONNECTED) {
+            setConnectionError(false);
+        }
+        return;
     }
-  }, [selectedFriend, isReady, activeCall, callStatus, incomingCall, connectionError]);
+
+    // If we are connected to someone else, end it
+    if (activeCall && currentActiveId !== desiredId) {
+        console.log("Switching: Ending previous call");
+        endCall();
+        return; // Wait for state to become ENDED
+    }
+
+    // If no active call and status is ended, start new call
+    if (!activeCall && callStatus === CallStatus.ENDED) {
+        // Debounce slightly or check logic
+        if (targetFriendIdRef.current === desiredId && !connectionError) {
+            console.log("Switching: Starting new call to", desiredId);
+            makeCall(desiredId, selectedFriend.displayName)
+                .catch((e) => {
+                    console.error("Connection failed", e);
+                    setConnectionError(true);
+                });
+        }
+    }
+  }, [selectedFriend, isMediaReady, activeCall, callStatus, incomingCall, connectionError]);
+
+  // Handle manual selection change
+  const handleFriendSelect = (friend: UserProfile) => {
+      if (selectedFriend?.uid === friend.uid) return;
+      
+      setConnectionError(false);
+      setSelectedFriend(friend);
+      targetFriendIdRef.current = friend.uid;
+      
+      // If we are already calling someone else, we rely on the effect above to tear it down first
+  };
 
   // 4. Auto-Answer
   useEffect(() => {
@@ -142,14 +163,19 @@ const WalkieTalkie: React.FC = () => {
 
   const handleManualRetry = () => {
     setConnectionError(false);
-    prevFriendIdRef.current = null;
+    // Force re-trigger of effect
+    const current = selectedFriend;
+    setSelectedFriend(null);
+    setTimeout(() => {
+        setSelectedFriend(current);
+        if(current) targetFriendIdRef.current = current.uid;
+    }, 100);
   };
 
   const isConnected = callStatus === CallStatus.CONNECTED;
   const isConnecting = callStatus === CallStatus.OFFERING || callStatus === CallStatus.RINGING;
   const isRemoteTalking = activeCall?.activeSpeakerId && activeCall.activeSpeakerId !== user?.uid;
 
-  // Determine Main UI State Color
   let stateColor = "text-slate-500";
   let ringColor = "border-slate-800";
   let glowColor = "shadow-none";
@@ -193,40 +219,13 @@ const WalkieTalkie: React.FC = () => {
     toggleTalk(false);
   };
 
-  const activateApp = async () => {
-    setPermissionDenied(false);
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach((track) => track.stop());
-      ensureAudioContext();
-      setIsReady(true);
-      prevFriendIdRef.current = null;
-    } catch (e) {
-      setPermissionDenied(true);
-    }
-  };
-
   // --- RENDERING ---
 
-  if (!isReady) {
+  if (!isMediaReady) {
     return (
       <div className="h-full flex flex-col items-center justify-center p-8 bg-slate-950 text-white">
-        <div className="relative mb-12">
-           <div className="absolute inset-0 bg-primary/20 blur-3xl rounded-full animate-pulse"></div>
-           <div className="relative w-32 h-32 bg-slate-900 rounded-[2.5rem] border border-white/10 flex items-center justify-center shadow-2xl">
-              <Radio size={48} className="text-primary" />
-           </div>
-        </div>
-        <h1 className="text-4xl font-black mb-2 tracking-tighter italic">PULSE</h1>
-        <p className="text-slate-400 text-center mb-12 text-sm max-w-xs leading-relaxed font-medium">
-          Instant voice networks. <br/>Tap below to initialize comms.
-        </p>
-        <button
-          onClick={activateApp}
-          className="w-full max-w-xs py-4 bg-primary text-white font-black rounded-2xl shadow-[0_0_30px_rgba(59,130,246,0.3)] active:scale-95 transition-all uppercase tracking-widest text-xs"
-        >
-          Initialize System
-        </button>
+        <div className="w-16 h-16 border-4 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
+        <p className="text-slate-400 text-xs tracking-widest uppercase">Initializing Systems...</p>
       </div>
     );
   }
@@ -257,12 +256,7 @@ const WalkieTalkie: React.FC = () => {
                return (
                   <button
                      key={friend.uid}
-                     onClick={() => {
-                        if (selectedFriend?.uid !== friend.uid) {
-                           setSelectedFriend(friend);
-                           setConnectionError(false);
-                        }
-                     }}
+                     onClick={() => handleFriendSelect(friend)}
                      className={`flex items-center gap-3 p-2 pr-4 rounded-full border transition-all snap-center min-w-max ${
                         isSelected 
                         ? "bg-slate-800 border-primary/50 shadow-lg shadow-black/20" 
@@ -301,13 +295,9 @@ const WalkieTalkie: React.FC = () => {
 
          {/* PTT BUTTON */}
          <div className="relative group">
-            {/* Outer Glow/Ripple */}
             <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 rounded-full transition-all duration-500 ${glowColor} opacity-50 blur-3xl pointer-events-none`}></div>
-            
-            {/* Status Ring */}
             <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-72 h-72 rounded-full border-[3px] transition-all duration-300 ${ringColor} opacity-50 pointer-events-none`}></div>
 
-            {/* The Button */}
             <button
                className={`relative w-64 h-64 rounded-full transition-all duration-200 active:scale-95 flex items-center justify-center shadow-2xl z-20 overflow-hidden ${isHoldingButton ? "bg-rose-500" : isRemoteTalking ? "bg-emerald-600" : "bg-slate-800"}`}
                onMouseDown={handleTouchStart}
@@ -317,10 +307,7 @@ const WalkieTalkie: React.FC = () => {
                onTouchEnd={handleTouchEnd}
                style={{ WebkitTapHighlightColor: 'transparent' }}
             >
-               {/* Background Texture */}
                <div className="absolute inset-0 opacity-20 bg-[url('https://www.transparenttextures.com/patterns/carbon-fibre.png')]"></div>
-               
-               {/* Inner Content */}
                <div className="relative z-10 flex flex-col items-center gap-2">
                   {isHoldingButton ? (
                      <Mic size={48} className="text-white animate-pulse" />
@@ -333,15 +320,12 @@ const WalkieTalkie: React.FC = () => {
                         </div>
                      </div>
                   )}
-                  
                   {activeCall?.callerPhoto || selectedFriend?.photoURL ? (
                      <div className={`absolute inset-0 opacity-30 transition-opacity duration-300 ${isHoldingButton || isRemoteTalking ? "opacity-10" : "opacity-40"}`}>
                         <img src={activeCall?.callerPhoto || selectedFriend?.photoURL || ""} className="w-full h-full object-cover" />
                      </div>
                   ) : null}
                </div>
-
-               {/* Inner Shadow Gradient */}
                <div className="absolute inset-0 rounded-full shadow-[inset_0_10px_20px_rgba(0,0,0,0.5),inset_0_-10px_20px_rgba(255,255,255,0.1)] pointer-events-none"></div>
             </button>
          </div>

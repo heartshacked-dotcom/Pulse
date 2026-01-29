@@ -34,8 +34,7 @@ export class WebRTCService {
   localStream: MediaStream | null = null;
   remoteStream: MediaStream | null = null;
   
-  // RTDB Unsubscribes (using 'off')
-  // We store the ref and the callback to properly unbind later
+  // RTDB Unsubscribes
   rtdbListeners: { ref: any, callback: (snap: DataSnapshot) => void }[] = [];
   
   processedCandidates: Set<string> = new Set();
@@ -44,16 +43,24 @@ export class WebRTCService {
   private remoteDescriptionSet = false;
   private settingRemoteDescription = false;
   private candidateQueue: RTCIceCandidateInit[] = [];
-  private isDisposed = false;
+  
+  // Track current active call ID to preventing ghost signals
+  private currentCallId: string | null = null;
 
   constructor() {
     console.log("PulseRTC: Service initialized");
   }
 
-  async setupLocalMedia(): Promise<MediaStream> {
-    console.log("PulseRTC: Setting up local media...");
-    if (this.isDisposed) throw new Error("Service disposed");
-    
+  // --- MEDIA MANAGEMENT ---
+
+  async acquireMedia(): Promise<MediaStream> {
+    if (this.localStream) {
+      // Ensure tracks are enabled
+      this.localStream.getTracks().forEach(t => t.enabled = true);
+      return this.localStream;
+    }
+
+    console.log("PulseRTC: Acquiring new media stream...");
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Media devices API not supported");
     }
@@ -64,15 +71,13 @@ export class WebRTCService {
         audio: { 
           echoCancellation: true, 
           noiseSuppression: true, 
-          autoGainControl: true 
+          autoGainControl: true,
+          sampleRate: 48000,
+          channelCount: 1
         },
       });
-      if (this.isDisposed) {
-        stream.getTracks().forEach(t => t.stop());
-        throw new Error("Service disposed during media setup");
-      }
+      
       this.localStream = stream;
-      console.log("PulseRTC: Local media acquired", stream.id);
       return stream;
     } catch (e: any) {
       console.error("PulseRTC: Error accessing microphone.", e);
@@ -80,22 +85,56 @@ export class WebRTCService {
     }
   }
 
-  createPeerConnection(onTrack: (stream: MediaStream) => void) {
-    if (this.isDisposed) return null;
-    console.log("PulseRTC: Creating PeerConnection");
-    this.peerConnection = new RTCPeerConnection(servers);
-    this.remoteStream = new MediaStream();
+  releaseMedia() {
+    if (this.localStream) {
+      this.localStream.getTracks().forEach((track) => track.stop());
+      this.localStream = null;
+    }
+  }
+
+  // --- CALL LOGIC ---
+
+  private resetConnectionState() {
+    // 1. Detach Listeners
+    this.rtdbListeners.forEach(({ ref, callback }) => {
+        off(ref, "value", callback);
+    });
+    this.rtdbListeners = [];
+    
+    // 2. Clear Queues
+    this.processedCandidates.clear();
+    this.candidateQueue = [];
     this.remoteDescriptionSet = false;
     this.settingRemoteDescription = false;
-    this.candidateQueue = [];
-    this.processedCandidates.clear();
+    this.currentCallId = null;
 
-    // Add local tracks
-    this.localStream?.getTracks().forEach((track) => {
-      if (this.peerConnection && this.localStream) {
-        this.peerConnection.addTrack(track, this.localStream);
-      }
-    });
+    // 3. Close PeerConnection
+    if (this.peerConnection) {
+      this.peerConnection.ontrack = null;
+      this.peerConnection.onicecandidate = null;
+      this.peerConnection.close();
+      this.peerConnection = null;
+    }
+    
+    // 4. Reset Remote Stream
+    this.remoteStream = new MediaStream();
+  }
+
+  createPeerConnection(onTrack: (stream: MediaStream) => void) {
+    this.resetConnectionState();
+    
+    console.log("PulseRTC: Creating new PeerConnection");
+    this.peerConnection = new RTCPeerConnection(servers);
+    this.remoteStream = new MediaStream();
+
+    // Add local tracks (Clone keys to not disturb original stream)
+    if (this.localStream) {
+      this.localStream.getTracks().forEach((track) => {
+        if (this.peerConnection && this.localStream) {
+          this.peerConnection.addTrack(track, this.localStream);
+        }
+      });
+    }
 
     // Handle remote tracks
     this.peerConnection.ontrack = (event) => {
@@ -110,14 +149,13 @@ export class WebRTCService {
   }
 
   private async processBufferedCandidates() {
+    if (!this.peerConnection) return;
     console.log(`PulseRTC: Processing ${this.candidateQueue.length} buffered candidates`);
     for (const candidate of this.candidateQueue) {
       try {
-        if (this.peerConnection && !this.isDisposed) {
-          await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-        }
+        await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
-        console.error("PulseRTC: Error adding buffered candidate", e);
+        console.warn("PulseRTC: Error adding buffered candidate", e);
       }
     }
     this.candidateQueue = [];
@@ -129,18 +167,18 @@ export class WebRTCService {
     metadata?: Record<string, any>,
   ): Promise<string> {
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
-    if (this.isDisposed) throw new Error("Service disposed");
 
     // RTDB: Push new call to 'calls' node
     const callsRef = ref(rtdb, "calls");
     const newCallRef = push(callsRef);
     const callId = newCallRef.key as string;
+    this.currentCallId = callId;
     
-    console.log("PulseRTC: Creating call (RTDB)", callId);
+    console.log("PulseRTC: Creating call", callId);
 
     // 1. Listen for ICE candidates locally and push to RTDB
     this.peerConnection.onicecandidate = async (event) => {
-      if (event.candidate && !this.isDisposed) {
+      if (event.candidate && this.currentCallId === callId) {
         try {
            const candidatesRef = ref(rtdb, `calls/${callId}/offerCandidates`);
            await push(candidatesRef, event.candidate.toJSON());
@@ -152,8 +190,6 @@ export class WebRTCService {
 
     // 2. Create Offer
     const offerDescription = await this.peerConnection.createOffer();
-    if (this.isDisposed) throw new Error("Service disposed during offer creation");
-    
     await this.peerConnection.setLocalDescription(offerDescription);
 
     // 3. Write Initial Data to RTDB
@@ -176,9 +212,8 @@ export class WebRTCService {
     // 4. Listen for Answer in RTDB
     const callRef = ref(rtdb, `calls/${callId}`);
     const answerListener = onValue(callRef, async (snapshot) => {
-      if (this.isDisposed) return;
       const data = snapshot.val();
-      if (!this.peerConnection || !data) return;
+      if (this.currentCallId !== callId || !this.peerConnection || !data) return;
 
       // A. Handle Remote Description (Answer)
       if (data.answer && !this.remoteDescriptionSet && !this.settingRemoteDescription) {
@@ -203,11 +238,10 @@ export class WebRTCService {
     // 5. Listen for Answer Candidates in RTDB
     const answerCandidatesRef = ref(rtdb, `calls/${callId}/answerCandidates`);
     const candidatesListener = onValue(answerCandidatesRef, async (snapshot) => {
-      if (this.isDisposed) return;
+      if (this.currentCallId !== callId) return;
       const candidates = snapshot.val();
       if (!candidates) return;
 
-      // Iterate keys since RTDB stores lists as objects with push IDs
       Object.values(candidates).forEach(async (candidate: any) => {
           const candStr = JSON.stringify(candidate);
           if (!this.processedCandidates.has(candStr)) {
@@ -215,7 +249,7 @@ export class WebRTCService {
             if (this.remoteDescriptionSet) {
               try {
                 await this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate));
-              } catch (e) { console.error("PulseRTC: Error adding answer candidate", e); }
+              } catch (e) { }
             } else {
               this.candidateQueue.push(candidate);
             }
@@ -228,9 +262,9 @@ export class WebRTCService {
   }
 
   async answerCall(callId: string) {
-    console.log("PulseRTC: Answering Call (RTDB)", callId);
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
-    if (this.isDisposed) throw new Error("Service disposed");
+    this.currentCallId = callId;
+    console.log("PulseRTC: Answering Call", callId);
 
     const callRef = ref(rtdb, `calls/${callId}`);
     const snapshot = await get(callRef);
@@ -243,15 +277,15 @@ export class WebRTCService {
 
     // 1. Listen for ICE candidates locally and push to RTDB
     this.peerConnection.onicecandidate = async (event) => {
-      if (event.candidate && !this.isDisposed) {
+      if (event.candidate && this.currentCallId === callId) {
         try {
           const candidatesRef = ref(rtdb, `calls/${callId}/answerCandidates`);
           await push(candidatesRef, event.candidate.toJSON());
-        } catch (e) { console.error("PulseRTC: Error uploading callee candidate", e); }
+        } catch (e) { }
       }
     };
 
-    // 2. Set Remote Description (Offer) IMMEDIATELY
+    // 2. Set Remote Description (Offer)
     if (this.peerConnection.signalingState === 'stable') {
         const offerDescription = callData.offer;
         try {
@@ -267,8 +301,6 @@ export class WebRTCService {
 
     // 3. Create Answer
     const answerDescription = await this.peerConnection.createAnswer();
-    if (this.isDisposed) throw new Error("Service disposed during answer creation");
-
     await this.peerConnection.setLocalDescription(answerDescription);
 
     const answer = {
@@ -279,11 +311,9 @@ export class WebRTCService {
     // Update RTDB
     await update(callRef, { answer, status: "CONNECTED" });
 
-    // 4. Process Existing Offer Candidates from RTDB
-    // We check the separate node `offerCandidates`
+    // 4. Process Existing Offer Candidates
     const offerCandidatesRef = ref(rtdb, `calls/${callId}/offerCandidates`);
     
-    // One-time fetch for existing
     const candidatesSnap = await get(offerCandidatesRef);
     if (candidatesSnap.exists()) {
         const candidates = candidatesSnap.val();
@@ -300,7 +330,7 @@ export class WebRTCService {
 
     // 5. Listen for NEW Offer Candidates
     const listener = onValue(offerCandidatesRef, async (snapshot) => {
-      if (this.isDisposed) return;
+      if (this.currentCallId !== callId) return;
       const candidates = snapshot.val();
       if (!candidates) return;
 
@@ -321,32 +351,20 @@ export class WebRTCService {
     this.rtdbListeners.push({ ref: offerCandidatesRef, callback: listener });
   }
 
-  async cleanup(callId: string | null) {
-    console.log("PulseRTC: Cleaning up session");
-    this.isDisposed = true; 
+  async endCurrentSession(callId: string | null) {
+    console.log("PulseRTC: Ending session", callId);
     
-    // Detach RTDB listeners
-    this.rtdbListeners.forEach(({ ref, callback }) => {
-        off(ref, "value", callback);
-    });
-    this.rtdbListeners = [];
-    
-    this.processedCandidates.clear();
-    this.candidateQueue = [];
-    this.remoteDescriptionSet = false;
-    this.settingRemoteDescription = false;
+    // 1. Reset Internal State (closes PC, detaches listeners)
+    this.resetConnectionState();
 
-    if (this.peerConnection) {
-      this.peerConnection.close();
-      this.peerConnection = null;
-    }
-    
+    // 2. Mute Local Stream (but keep it alive for next call)
     if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => track.stop());
-      this.localStream = null;
+        this.localStream.getAudioTracks().forEach(t => {
+            t.enabled = false;
+        });
     }
-    this.remoteStream = null;
 
+    // 3. Archive/Cleanup DB
     if (callId) {
       try {
         const callRef = ref(rtdb, `calls/${callId}`);
@@ -354,19 +372,15 @@ export class WebRTCService {
         
         if (snap.exists()) {
           const data = snap.val();
-          
-          // ARCHIVE TO FIRESTORE before deleting from RTDB
-          // This satisfies: "Call History: Firestore"
           if (data.status !== "ENDED" && data.status !== "REJECTED") {
               const historyData = { ...data, status: "ENDED", endedAt: Date.now() };
-              // We don't need all candidates in history usually, saving space
+              // Minimal archiving
               delete historyData.offerCandidates;
               delete historyData.answerCandidates;
               
-              const historyRef = doc(collection(db, "calls")); // Firestore
+              const historyRef = doc(collection(db, "calls"));
               await setDoc(historyRef, historyData);
               
-              // Remove from RTDB to keep it lightweight
               await remove(callRef);
           } else {
              await remove(callRef);
