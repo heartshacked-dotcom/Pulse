@@ -1,172 +1,226 @@
 
-import { STUN_SERVERS } from '../constants';
+import { db } from "./firebase";
+import {
+  collection,
+  addDoc,
+  onSnapshot,
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+} from "firebase/firestore";
+
+const servers = {
+  iceServers: [
+    {
+      urls: [
+        "stun:stun.l.google.com:19302",
+        "stun:stun1.l.google.com:19302",
+        "stun:stun2.l.google.com:19302",
+        "stun:stun3.l.google.com:19302",
+        "stun:stun4.l.google.com:19302",
+      ],
+    },
+  ],
+  iceCandidatePoolSize: 10,
+};
 
 export class WebRTCService {
-  public peerConnection: RTCPeerConnection | null = null;
-  public localStream: MediaStream | null = null;
-  public remoteStream: MediaStream | null = null;
-  private onRemoteStreamCallback: ((stream: MediaStream) => void) | null = null;
-  private onIceCandidateCallback: ((candidate: RTCIceCandidate) => void) | null = null;
-  
-  private candidateQueue: RTCIceCandidateInit[] = [];
-  private isRemoteDescriptionSet = false;
+  peerConnection: RTCPeerConnection | null = null;
+  localStream: MediaStream | null = null;
+  remoteStream: MediaStream | null = null;
 
-  constructor() {
-    console.log("[PULSE-DEBUG] Initializing WebRTCService Instance...");
-    this.initPC();
+  constructor() {}
+
+  async setupLocalMedia(): Promise<MediaStream> {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error("Media devices API not supported");
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: false,
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+      this.localStream = stream;
+      return stream;
+    } catch (e: any) {
+      console.error("Error accessing microphone.", e.name, e.message);
+      throw e;
+    }
   }
 
-  private initPC() {
-    this.peerConnection = new RTCPeerConnection(STUN_SERVERS);
-    this.setupEventListeners();
+  createPeerConnection(onTrack: (stream: MediaStream) => void) {
+    this.peerConnection = new RTCPeerConnection(servers);
+    this.remoteStream = new MediaStream();
+
+    this.localStream?.getTracks().forEach((track) => {
+      if (this.peerConnection && this.localStream) {
+        this.peerConnection.addTrack(track, this.localStream);
+      }
+    });
+
+    this.peerConnection.ontrack = (event) => {
+      event.streams[0].getTracks().forEach((track) => {
+        this.remoteStream?.addTrack(track);
+      });
+      onTrack(this.remoteStream!);
+    };
+
+    return this.peerConnection;
   }
 
-  private setupEventListeners() {
-    if (!this.peerConnection) return;
+  async createCall(
+    callerId: string,
+    calleeId: string,
+    metadata?: Record<string, any>,
+  ): Promise<string> {
+    if (!this.peerConnection) throw new Error("PeerConnection not initialized");
+
+    const callDocRef = doc(collection(db, "calls"));
+    const offerCandidatesCol = collection(callDocRef, "offerCandidates");
 
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        if (this.onIceCandidateCallback) this.onIceCandidateCallback(event.candidate);
+        addDoc(offerCandidatesCol, {
+          candidate: event.candidate.toJSON(),
+          type: "caller",
+        });
       }
     };
 
-    this.peerConnection.oniceconnectionstatechange = () => {
-        console.log("[PULSE-DEBUG] ICE State:", this.peerConnection?.iceConnectionState);
-    };
+    const offerDescription = await this.peerConnection.createOffer();
+    await this.peerConnection.setLocalDescription(offerDescription);
 
-    this.peerConnection.ontrack = (event) => {
-      console.log("[PULSE-DEBUG] Remote track received:", event.track.kind);
-      
-      // Better track handling: use the stream provided by the event if possible
-      if (event.streams && event.streams[0]) {
-          this.remoteStream = event.streams[0];
-      } else {
-          if (!this.remoteStream) this.remoteStream = new MediaStream();
-          this.remoteStream.addTrack(event.track);
-      }
-      
-      if (this.onRemoteStreamCallback) {
-        this.onRemoteStreamCallback(this.remoteStream);
-      }
-    };
-  }
-
-  public async startLocalStream(videoRequested: boolean = false): Promise<MediaStream> {
-    const constraints: MediaStreamConstraints = {
-      audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
+    const callData = {
+      callId: callDocRef.id,
+      callerId,
+      calleeId,
+      type: "PTT",
+      offer: {
+        type: offerDescription.type,
+        sdp: offerDescription.sdp,
       },
-      video: videoRequested ? { facingMode: 'user' } : false
+      status: "offering",
+      timestamp: Date.now(),
+      ...metadata,
     };
 
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      this.localStream = stream;
-      
-      if (this.peerConnection) {
-          // Clear existing senders to avoid duplicates on re-start
-          this.peerConnection.getSenders().forEach(sender => {
-              if (sender.track) sender.track.stop();
-              this.peerConnection?.removeTrack(sender);
-          });
+    await setDoc(callDocRef, callData);
 
-          this.localStream.getTracks().forEach((track) => {
-              this.peerConnection?.addTrack(track, this.localStream!);
-          });
+    onSnapshot(callDocRef, (snapshot) => {
+      const data = snapshot.data();
+      if (
+        !this.peerConnection?.currentRemoteDescription &&
+        data?.answer &&
+        this.peerConnection
+      ) {
+        const answerDescription = new RTCSessionDescription(data.answer);
+        this.peerConnection.setRemoteDescription(answerDescription);
       }
+    });
 
-      return stream;
-    } catch (error) {
-      console.error("[PULSE-DEBUG] Media Access Error:", error);
-      throw error;
-    }
-  }
-
-  public toggleAudio(enabled: boolean) {
-    if (this.localStream) {
-      this.localStream.getAudioTracks().forEach(track => {
-        track.enabled = enabled;
-      });
-    }
-  }
-
-  public async createOffer(): Promise<RTCSessionDescriptionInit> {
-    if (!this.peerConnection) throw new Error("No PC");
-    const offer = await this.peerConnection.createOffer();
-    await this.peerConnection.setLocalDescription(offer);
-    return offer;
-  }
-
-  public async createAnswer(offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> {
-    if (!this.peerConnection) throw new Error("No PC");
-    await this.setRemoteDescription(offer);
-    const answer = await this.peerConnection.createAnswer();
-    await this.peerConnection.setLocalDescription(answer);
-    return answer;
-  }
-
-  public async addAnswer(answer: RTCSessionDescriptionInit) {
-    if (!this.peerConnection) return;
-    if (this.peerConnection.signalingState !== 'stable') {
-      await this.setRemoteDescription(answer);
-    }
-  }
-
-  public async setRemoteDescription(desc: RTCSessionDescriptionInit) {
-      if (!this.peerConnection) return;
-      try {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(desc));
-        this.isRemoteDescriptionSet = true;
-        await this.processCandidateQueue();
-      } catch (e) {
-        console.error("[PULSE-DEBUG] Remote Desc Error:", e);
-      }
-  }
-
-  public async addIceCandidate(candidate: RTCIceCandidateInit) {
-    if (!this.peerConnection) return;
-    if (!this.isRemoteDescriptionSet) {
-        this.candidateQueue.push(candidate);
-        return;
-    }
-    try {
-      await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (e) {
-      console.error("[PULSE-DEBUG] Candidate Error:", e);
-    }
-  }
-
-  private async processCandidateQueue() {
-      if (!this.peerConnection) return;
-      while (this.candidateQueue.length > 0) {
-          const candidate = this.candidateQueue.shift();
-          if (candidate) {
-              try { await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } catch (e) {}
+    const answerCandidatesCol = collection(callDocRef, "answerCandidates");
+    onSnapshot(answerCandidatesCol, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === "added") {
+          const data = change.doc.data();
+          if (this.peerConnection) {
+            const candidate = new RTCIceCandidate(data.candidate);
+            this.peerConnection.addIceCandidate(candidate);
           }
+        }
+      });
+    });
+
+    return callDocRef.id;
+  }
+
+  async answerCall(callId: string) {
+    if (!this.peerConnection) throw new Error("PeerConnection not initialized");
+
+    const callDocRef = doc(db, "calls", callId);
+    const answerCandidatesCol = collection(callDocRef, "answerCandidates");
+    const callSnap = await getDoc(callDocRef);
+    const callData = callSnap.data();
+
+    this.peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        addDoc(answerCandidatesCol, {
+          candidate: event.candidate.toJSON(),
+          type: "answer",
+        });
       }
+    };
+
+    const offerDescription = callData?.offer;
+    await this.peerConnection.setRemoteDescription(
+      new RTCSessionDescription(offerDescription),
+    );
+
+    const answerDescription = await this.peerConnection.createAnswer();
+    await this.peerConnection.setLocalDescription(answerDescription);
+
+    const answer = {
+      type: answerDescription.type,
+      sdp: answerDescription.sdp,
+    };
+
+    await updateDoc(callDocRef, { answer, status: "connected" });
+
+    const offerCandidatesCol = collection(callDocRef, "offerCandidates");
+    onSnapshot(offerCandidatesCol, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        if (change.type === "added") {
+          const data = change.doc.data();
+          if (this.peerConnection) {
+            const candidate = new RTCIceCandidate(data.candidate);
+            this.peerConnection.addIceCandidate(candidate);
+          }
+        }
+      });
+    });
   }
 
-  public onRemoteStream(callback: (stream: MediaStream) => void) {
-    this.onRemoteStreamCallback = callback;
-  }
-
-  public onIceCandidate(callback: (candidate: RTCIceCandidate) => void) {
-    this.onIceCandidateCallback = callback;
-  }
-
-  public close() {
-    this.localStream?.getTracks().forEach(track => track.stop());
+  async cleanup(callId: string | null) {
     if (this.peerConnection) {
-        this.peerConnection.ontrack = null;
-        this.peerConnection.onicecandidate = null;
-        this.peerConnection.close();
+      this.peerConnection.getReceivers().forEach((receiver) => {
+        if (receiver.track) {
+          receiver.track.stop();
+          receiver.track.enabled = false;
+        }
+      });
+      this.peerConnection.close();
+      this.peerConnection = null;
     }
-    this.peerConnection = null;
-    this.localStream = null;
+    if (this.localStream) {
+      this.localStream.getTracks().forEach((track) => {
+        track.enabled = false;
+        track.stop();
+      });
+      this.localStream = null;
+    }
     this.remoteStream = null;
-    this.candidateQueue = [];
-    this.isRemoteDescriptionSet = false;
+
+    if (callId) {
+      try {
+        const callRef = doc(db, "calls", callId);
+        const snap = await getDoc(callRef);
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data.status !== "ended" && data.status !== "rejected") {
+            const endedAt = Date.now();
+            await updateDoc(callRef, {
+              status: "ended",
+              endedAt,
+            });
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
   }
 }
+
+export const webRTCService = new WebRTCService();

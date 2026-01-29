@@ -1,5 +1,6 @@
+
 import React from 'react';
-import { Phone, Users, User, Radio } from 'lucide-react';
+import { Radio, User } from 'lucide-react';
 
 interface Props {
   currentPage: string;
@@ -8,8 +9,6 @@ interface Props {
 
 const BottomNav: React.FC<Props> = ({ currentPage, onNavigate }) => {
   const navItems = [
-    { id: 'calls', icon: Phone, label: 'Calls' },
-    { id: 'contacts', icon: Users, label: 'Contacts' },
     { id: 'ptt', icon: Radio, label: 'Walkie' },
     { id: 'profile', icon: User, label: 'Profile' },
   ];

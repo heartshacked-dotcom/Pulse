@@ -1,7 +1,6 @@
+
 export enum CallType {
-  AUDIO = 'AUDIO',
-  VIDEO = 'VIDEO',
-  PTT = 'PTT' // Walkie-talkie mode
+  PTT = 'PTT' // Pure walkie-talkie mode
 }
 
 export enum CallStatus {

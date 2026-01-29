@@ -1,8 +1,7 @@
 {
   "name": "Pulse",
-  "description": "A realtime walkie-talkie and calling application using free-tier technologies.",
+  "description": "A realtime walkie-talkie application for instant voice communication.",
   "requestFramePermissions": [
-    "camera",
     "microphone"
   ]
 }

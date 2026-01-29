@@ -1,22 +1,14 @@
 {
   "rules": {
-    "presence": {
+    "users": {
       "$uid": {
         ".read": "auth != null",
         ".write": "auth != null && auth.uid == $uid",
-        "state": {
+        "presence": {
           ".validate": "newData.isString() && (newData.val() == 'online' || newData.val() == 'offline')"
         },
-        "last_changed": {
+        "lastSeen": {
           ".validate": "newData.isNumber() && newData.val() <= now"
-        }
-      }
-    },
-    "typing": {
-      "$room_id": {
-        "$uid": {
-          ".read": "auth != null",
-          ".write": "auth != null && auth.uid == $uid"
         }
       }
     },

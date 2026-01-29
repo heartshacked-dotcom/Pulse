@@ -11,34 +11,43 @@ service cloud.firestore {
       return isSignedIn() && (call.callerId == request.auth.uid || call.calleeId == request.auth.uid);
     }
 
-    // Users: Read profiles to find friends, only write own presence/profile
+    // Users: Read profiles to find contacts, only write own profile
     match /users/{userId} {
       allow read: if isSignedIn();
       allow write: if isSignedIn() && request.auth.uid == userId;
     }
 
-    // Calls: participants only
+    // Calls: Create and manage calls between two users
     match /calls/{callId} {
+      // Only authenticated users can create calls as the caller
       allow create: if isSignedIn() && request.resource.data.callerId == request.auth.uid;
       
-      allow read: if isSignedIn() && (
-        resource.data.callerId == request.auth.uid || 
-        resource.data.calleeId == request.auth.uid
-      );
+      // Read access: all authenticated users can read to check for incoming calls
+      allow read: if isSignedIn();
 
-      // Only status and signaling fields (answer/activeSpeakerId) should be updated by participants
+      // Update access for participants (status, answer, activeSpeakerId, etc.)
       allow update: if isSignedIn() && (
         resource.data.callerId == request.auth.uid || 
         resource.data.calleeId == request.auth.uid
       );
+
+      // Delete is not allowed (maintain history)
+      allow delete: if false;
       
-      // Strict signaling subcollection rules
+      // Offer ICE Candidates subcollection - participants can read/write
       match /offerCandidates/{candidateId} {
         allow read, write: if isParticipant(callId);
       }
+      
+      // Answer ICE Candidates subcollection - participants can read/write
       match /answerCandidates/{candidateId} {
         allow read, write: if isParticipant(callId);
       }
+    }
+
+    // Deny all other access by default
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
