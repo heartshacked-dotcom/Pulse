@@ -186,7 +186,14 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   }, [activeCall?.callId, user?.uid]);
 
   const makeCall = async (calleeId: string, calleeName: string) => {
-    if (!user || !db || !rtcRef.current || statusRef.current !== CallStatus.ENDED) return;
+    if (!user || !db || !rtcRef.current) return;
+    
+    // Critical: check ref to prevent race condition when switching users rapidly
+    if (statusRef.current !== CallStatus.ENDED) {
+       console.warn("Attempted to make call while not in ENDED state");
+       return; 
+    }
+    
     ensureAudioContext();
 
     try {
@@ -232,6 +239,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     } catch (e) {
       console.error("Error making walkie call:", e);
       cleanupCall();
+      throw e; // Re-throw to let UI handle connection error state
     }
   };
 
@@ -285,12 +293,18 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   const cleanupCall = () => {
+    // 1. Synchronously reset state refs to allow immediate re-calls
+    statusRef.current = CallStatus.ENDED;
+    activeCallRef.current = null;
+
+    // 2. Trigger React state updates
     setCallStatus(CallStatus.ENDED);
     setActiveCall(null);
     setIncomingCall(null);
     setRemoteStream(null);
     setLocalStream(null);
 
+    // 3. Clean up subscriptions and WebRTC
     if (callUnsubRef.current) {
       callUnsubRef.current();
       callUnsubRef.current = null;
@@ -298,6 +312,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
 
     if (rtcRef.current) {
       rtcRef.current.cleanup(activeCall?.callId || null);
+      
+      // Re-initialize for next call
       rtcRef.current = new WebRTCService();
       rtcRef.current.createPeerConnection((stream) => {
         setRemoteStream(stream);

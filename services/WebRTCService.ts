@@ -35,6 +35,7 @@ export class WebRTCService {
   // Signaling state tracking
   private remoteDescriptionSet = false;
   private candidateQueue: RTCIceCandidateInit[] = [];
+  private isDisposed = false;
 
   constructor() {
     console.log("PulseRTC: Service initialized");
@@ -42,6 +43,8 @@ export class WebRTCService {
 
   async setupLocalMedia(): Promise<MediaStream> {
     console.log("PulseRTC: Setting up local media...");
+    if (this.isDisposed) throw new Error("Service disposed");
+    
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Media devices API not supported");
     }
@@ -55,6 +58,10 @@ export class WebRTCService {
           autoGainControl: true 
         },
       });
+      if (this.isDisposed) {
+        stream.getTracks().forEach(t => t.stop());
+        throw new Error("Service disposed during media setup");
+      }
       this.localStream = stream;
       console.log("PulseRTC: Local media acquired", stream.id);
       return stream;
@@ -65,6 +72,7 @@ export class WebRTCService {
   }
 
   createPeerConnection(onTrack: (stream: MediaStream) => void) {
+    if (this.isDisposed) return null;
     console.log("PulseRTC: Creating PeerConnection");
     this.peerConnection = new RTCPeerConnection(servers);
     this.remoteStream = new MediaStream();
@@ -106,7 +114,7 @@ export class WebRTCService {
     console.log(`PulseRTC: Processing ${this.candidateQueue.length} buffered candidates`);
     for (const candidate of this.candidateQueue) {
       try {
-        if (this.peerConnection) {
+        if (this.peerConnection && !this.isDisposed) {
           await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
           console.log("PulseRTC: Buffered candidate added successfully");
         }
@@ -123,13 +131,14 @@ export class WebRTCService {
     metadata?: Record<string, any>,
   ): Promise<string> {
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
+    if (this.isDisposed) throw new Error("Service disposed");
 
     const callDocRef = doc(collection(db, "calls"));
     console.log("PulseRTC: Creating call document", callDocRef.id);
 
     // 1. Listen for ICE candidates locally and upload them
     this.peerConnection.onicecandidate = async (event) => {
-      if (event.candidate) {
+      if (event.candidate && !this.isDisposed) {
         console.log("PulseRTC: Found Local Caller Candidate");
         try {
           // Use arrayUnion to safely add to the list
@@ -144,6 +153,8 @@ export class WebRTCService {
 
     // 2. Create Offer
     const offerDescription = await this.peerConnection.createOffer();
+    if (this.isDisposed) throw new Error("Service disposed during offer creation");
+    
     await this.peerConnection.setLocalDescription(offerDescription);
     console.log("PulseRTC: Local Description set (Offer)");
 
@@ -159,7 +170,7 @@ export class WebRTCService {
       },
       offerCandidates: [], 
       answerCandidates: [],
-      status: "OFFERING", // FIXED: Uppercase to match CallStatus.OFFERING
+      status: "OFFERING", 
       timestamp: Date.now(),
       ...metadata,
     };
@@ -169,6 +180,7 @@ export class WebRTCService {
 
     // 4. Listen for Answer
     const unsub = onSnapshot(callDocRef, async (snapshot) => {
+      if (this.isDisposed) return; // Guard against zombie listener
       const data = snapshot.data();
       if (!this.peerConnection || !data) return;
 
@@ -216,6 +228,7 @@ export class WebRTCService {
   async answerCall(callId: string) {
     console.log("PulseRTC: Answering Call", callId);
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
+    if (this.isDisposed) throw new Error("Service disposed");
 
     const callDocRef = doc(db, "calls", callId);
     const callSnap = await getDoc(callDocRef);
@@ -229,7 +242,7 @@ export class WebRTCService {
 
     // 1. Listen for ICE candidates locally and upload them
     this.peerConnection.onicecandidate = async (event) => {
-      if (event.candidate) {
+      if (event.candidate && !this.isDisposed) {
         console.log("PulseRTC: Found Local Callee Candidate");
         try {
           await updateDoc(callDocRef, {
@@ -256,6 +269,8 @@ export class WebRTCService {
 
     // 3. Create Answer
     const answerDescription = await this.peerConnection.createAnswer();
+    if (this.isDisposed) throw new Error("Service disposed during answer creation");
+
     await this.peerConnection.setLocalDescription(answerDescription);
     console.log("PulseRTC: Local Description set (Answer)");
 
@@ -264,7 +279,7 @@ export class WebRTCService {
       sdp: answerDescription.sdp,
     };
 
-    await updateDoc(callDocRef, { answer, status: "CONNECTED" }); // FIXED: Uppercase to match CallStatus.CONNECTED
+    await updateDoc(callDocRef, { answer, status: "CONNECTED" });
     console.log("PulseRTC: Sent Answer");
 
     // 4. Process Existing Offer Candidates
@@ -285,6 +300,7 @@ export class WebRTCService {
 
     // 5. Listen for NEW Offer Candidates
     const unsub = onSnapshot(callDocRef, async (snapshot) => {
+      if (this.isDisposed) return;
       const data = snapshot.data();
       if (!this.peerConnection || !data) return;
 
@@ -316,6 +332,8 @@ export class WebRTCService {
 
   async cleanup(callId: string | null) {
     console.log("PulseRTC: Cleaning up session");
+    this.isDisposed = true; // Mark as disposed
+    
     // Unsubscribe from all Firestore listeners
     this.unsubscribes.forEach(unsub => unsub());
     this.unsubscribes = [];
@@ -346,9 +364,9 @@ export class WebRTCService {
         if (snap.exists()) {
           const data = snap.data();
           // Only end if not already ended/rejected
-          if (data.status !== "ENDED" && data.status !== "REJECTED") { // FIXED: Uppercase
+          if (data.status !== "ENDED" && data.status !== "REJECTED") { 
             await updateDoc(callRef, {
-              status: "ENDED", // FIXED: Uppercase
+              status: "ENDED",
               endedAt: Date.now(),
             });
             console.log("PulseRTC: Call marked as ended in DB");
