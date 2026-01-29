@@ -43,12 +43,13 @@ service cloud.firestore {
       );
     }
 
-    // Calls - Simplified for Single Doc Signaling
+    // Calls - Single Document Signaling
     match /calls/{callId} {
       // Allow creation if you are the caller
       allow create: if isSignedIn() && request.resource.data.callerId == request.auth.uid;
       
       // Allow read/update if you are the caller OR the callee
+      // Note: We check resource.data (existing doc) for updates
       allow read, update: if isSignedIn() && (
         resource.data.callerId == request.auth.uid || 
         resource.data.calleeId == request.auth.uid

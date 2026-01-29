@@ -30,11 +30,18 @@ export class WebRTCService {
   localStream: MediaStream | null = null;
   remoteStream: MediaStream | null = null;
   unsubscribes: (() => void)[] = [];
-  processedCandidateszb: Set<string> = new Set();
+  processedCandidates: Set<string> = new Set();
+  
+  // Signaling state tracking
+  private remoteDescriptionSet = false;
+  private candidateQueue: RTCIceCandidateInit[] = [];
 
-  constructor() {}
+  constructor() {
+    console.log("PulseRTC: Service initialized");
+  }
 
   async setupLocalMedia(): Promise<MediaStream> {
+    console.log("PulseRTC: Setting up local media...");
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("Media devices API not supported");
     }
@@ -42,39 +49,72 @@ export class WebRTCService {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: false,
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        audio: { 
+          echoCancellation: true, 
+          noiseSuppression: true, 
+          autoGainControl: true 
+        },
       });
       this.localStream = stream;
+      console.log("PulseRTC: Local media acquired", stream.id);
       return stream;
     } catch (e: any) {
-      console.error("Error accessing microphone.", e.name, e.message);
+      console.error("PulseRTC: Error accessing microphone.", e);
       throw e;
     }
   }
 
   createPeerConnection(onTrack: (stream: MediaStream) => void) {
+    console.log("PulseRTC: Creating PeerConnection");
     this.peerConnection = new RTCPeerConnection(servers);
     this.remoteStream = new MediaStream();
+    this.remoteDescriptionSet = false;
+    this.candidateQueue = [];
+    this.processedCandidates.clear();
 
+    // Add local tracks
     this.localStream?.getTracks().forEach((track) => {
       if (this.peerConnection && this.localStream) {
+        console.log("PulseRTC: Adding local track", track.kind);
         this.peerConnection.addTrack(track, this.localStream);
       }
     });
 
+    // Handle remote tracks
     this.peerConnection.ontrack = (event) => {
+      console.log("PulseRTC: Remote track received", event.streams[0].id);
       event.streams[0].getTracks().forEach((track) => {
         this.remoteStream?.addTrack(track);
       });
       onTrack(this.remoteStream!);
     };
 
-    // Log connection state changes for debugging
+    // Log connection state
     this.peerConnection.onconnectionstatechange = () => {
-      console.log("WebRTC Connection State:", this.peerConnection?.connectionState);
+      console.log("PulseRTC: Connection State Change:", this.peerConnection?.connectionState);
+    };
+
+    this.peerConnection.oniceconnectionstatechange = () => {
+      console.log("PulseRTC: ICE State Change:", this.peerConnection?.iceConnectionState);
     };
 
     return this.peerConnection;
+  }
+
+  // --- Helper to handle buffered candidates ---
+  private async processBufferedCandidates() {
+    console.log(`PulseRTC: Processing ${this.candidateQueue.length} buffered candidates`);
+    for (const candidate of this.candidateQueue) {
+      try {
+        if (this.peerConnection) {
+          await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+          console.log("PulseRTC: Buffered candidate added successfully");
+        }
+      } catch (e) {
+        console.error("PulseRTC: Error adding buffered candidate", e);
+      }
+    }
+    this.candidateQueue = [];
   }
 
   async createCall(
@@ -85,26 +125,29 @@ export class WebRTCService {
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
 
     const callDocRef = doc(collection(db, "calls"));
-    const candidateQueue: RTCIceCandidate[] = [];
-    let docCreated = false;
+    console.log("PulseRTC: Creating call document", callDocRef.id);
 
-    // Handle ICE Candidates - Write to 'offerCandidates' array
+    // 1. Listen for ICE candidates locally and upload them
     this.peerConnection.onicecandidate = async (event) => {
       if (event.candidate) {
-        const json = event.candidate.toJSON();
-        if (docCreated) {
+        console.log("PulseRTC: Found Local Caller Candidate");
+        try {
+          // Use arrayUnion to safely add to the list
           await updateDoc(callDocRef, {
-            offerCandidates: arrayUnion(json)
-          }).catch(e => console.error("Error sending offer candidate:", e));
-        } else {
-          candidateQueue.push(event.candidate);
+            offerCandidates: arrayUnion(event.candidate.toJSON())
+          });
+        } catch (e) {
+          console.error("PulseRTC: Error uploading caller candidate", e);
         }
       }
     };
 
+    // 2. Create Offer
     const offerDescription = await this.peerConnection.createOffer();
     await this.peerConnection.setLocalDescription(offerDescription);
+    console.log("PulseRTC: Local Description set (Offer)");
 
+    // 3. Write Initial Doc
     const callData = {
       callId: callDocRef.id,
       callerId,
@@ -114,7 +157,7 @@ export class WebRTCService {
         type: offerDescription.type,
         sdp: offerDescription.sdp,
       },
-      offerCandidates: [], // Initialize arrays
+      offerCandidates: [], 
       answerCandidates: [],
       status: "offering",
       timestamp: Date.now(),
@@ -122,37 +165,47 @@ export class WebRTCService {
     };
 
     await setDoc(callDocRef, callData);
-    docCreated = true;
+    console.log("PulseRTC: Call Document Written");
 
-    // Flush queued candidates
-    if (candidateQueue.length > 0) {
-      const jsonCandidates = candidateQueue.map(c => c.toJSON());
-      await updateDoc(callDocRef, {
-        offerCandidates: arrayUnion(...jsonCandidates)
-      });
-    }
-
-    // Listen for Answer and Answer Candidates
-    const unsub = onSnapshot(callDocRef, (snapshot) => {
+    // 4. Listen for Answer
+    const unsub = onSnapshot(callDocRef, async (snapshot) => {
       const data = snapshot.data();
       if (!this.peerConnection || !data) return;
 
-      // Handle Answer SDP
+      // A. Handle Remote Description (Answer)
       if (!this.peerConnection.currentRemoteDescription && data.answer) {
+        console.log("PulseRTC: Received Answer from Callee");
         const answerDescription = new RTCSessionDescription(data.answer);
-        this.peerConnection.setRemoteDescription(answerDescription);
+        try {
+          await this.peerConnection.setRemoteDescription(answerDescription);
+          this.remoteDescriptionSet = true;
+          console.log("PulseRTC: Remote Description Set (Answer)");
+          await this.processBufferedCandidates();
+        } catch (e) {
+          console.error("PulseRTC: Error setting remote description", e);
+        }
       }
 
-      // Handle Answer Candidates
+      // B. Handle Remote Candidates (Answer Candidates)
       if (data.answerCandidates && Array.isArray(data.answerCandidates)) {
-        data.answerCandidates.forEach((candidate: any) => {
+        for (const candidate of data.answerCandidates) {
           const candStr = JSON.stringify(candidate);
-          if (!this.processedCandidateszb.has(candStr)) {
-            this.processedCandidateszb.add(candStr);
-            this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate))
-              .catch(e => console.error("Error adding answer candidate", e));
+          if (!this.processedCandidates.has(candStr)) {
+            this.processedCandidates.add(candStr);
+            
+            if (this.remoteDescriptionSet) {
+              try {
+                await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                console.log("PulseRTC: Added Answer Candidate");
+              } catch (e) {
+                console.error("PulseRTC: Error adding answer candidate", e);
+              }
+            } else {
+              console.log("PulseRTC: Buffering Answer Candidate (Remote not set)");
+              this.candidateQueue.push(candidate);
+            }
           }
-        });
+        }
       }
     });
 
@@ -161,32 +214,50 @@ export class WebRTCService {
   }
 
   async answerCall(callId: string) {
+    console.log("PulseRTC: Answering Call", callId);
     if (!this.peerConnection) throw new Error("PeerConnection not initialized");
 
     const callDocRef = doc(db, "calls", callId);
     const callSnap = await getDoc(callDocRef);
+    
+    if (!callSnap.exists()) {
+       console.error("PulseRTC: Call document not found");
+       throw new Error("Call not found");
+    }
+    
     const callData = callSnap.data();
 
-    if (!callData) throw new Error("Call not found");
-
-    // Handle ICE Candidates - Write to 'answerCandidates' array
+    // 1. Listen for ICE candidates locally and upload them
     this.peerConnection.onicecandidate = async (event) => {
       if (event.candidate) {
-        await updateDoc(callDocRef, {
-          answerCandidates: arrayUnion(event.candidate.toJSON())
-        }).catch(e => console.error("Error sending answer candidate:", e));
+        console.log("PulseRTC: Found Local Callee Candidate");
+        try {
+          await updateDoc(callDocRef, {
+            answerCandidates: arrayUnion(event.candidate.toJSON())
+          });
+        } catch (e) {
+          console.error("PulseRTC: Error uploading callee candidate", e);
+        }
       }
     };
 
-    // Set Remote Description (Offer)
+    // 2. Set Remote Description (Offer) IMMEDIATELY
     const offerDescription = callData.offer;
-    await this.peerConnection.setRemoteDescription(
-      new RTCSessionDescription(offerDescription),
-    );
+    try {
+      await this.peerConnection.setRemoteDescription(
+        new RTCSessionDescription(offerDescription),
+      );
+      this.remoteDescriptionSet = true;
+      console.log("PulseRTC: Remote Description Set (Offer)");
+    } catch (e) {
+      console.error("PulseRTC: Failed to set remote description", e);
+      throw e;
+    }
 
-    // Create Answer
+    // 3. Create Answer
     const answerDescription = await this.peerConnection.createAnswer();
     await this.peerConnection.setLocalDescription(answerDescription);
+    console.log("PulseRTC: Local Description set (Answer)");
 
     const answer = {
       type: answerDescription.type,
@@ -194,33 +265,49 @@ export class WebRTCService {
     };
 
     await updateDoc(callDocRef, { answer, status: "connected" });
+    console.log("PulseRTC: Sent Answer");
 
-    // Process existing offer candidates immediately
+    // 4. Process Existing Offer Candidates
     if (callData.offerCandidates && Array.isArray(callData.offerCandidates)) {
-        callData.offerCandidates.forEach((candidate: any) => {
+        console.log(`PulseRTC: Processing ${callData.offerCandidates.length} existing offer candidates`);
+        for (const candidate of callData.offerCandidates) {
             const candStr = JSON.stringify(candidate);
-            if (!this.processedCandidateszb.has(candStr)) {
-              this.processedCandidateszb.add(candStr);
-              this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate))
-                .catch(e => console.error("Error adding initial offer candidate", e));
+            if (!this.processedCandidates.has(candStr)) {
+              this.processedCandidates.add(candStr);
+              try {
+                await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+              } catch (e) {
+                 console.error("PulseRTC: Error adding existing offer candidate", e);
+              }
             }
-        });
+        }
     }
 
-    // Listen for new Offer Candidates
-    const unsub = onSnapshot(callDocRef, (snapshot) => {
+    // 5. Listen for NEW Offer Candidates
+    const unsub = onSnapshot(callDocRef, async (snapshot) => {
       const data = snapshot.data();
       if (!this.peerConnection || !data) return;
 
       if (data.offerCandidates && Array.isArray(data.offerCandidates)) {
-        data.offerCandidates.forEach((candidate: any) => {
+        for (const candidate of data.offerCandidates) {
           const candStr = JSON.stringify(candidate);
-          if (!this.processedCandidateszb.has(candStr)) {
-            this.processedCandidateszb.add(candStr);
-            this.peerConnection?.addIceCandidate(new RTCIceCandidate(candidate))
-              .catch(e => console.error("Error adding offer candidate", e));
+          if (!this.processedCandidates.has(candStr)) {
+            this.processedCandidates.add(candStr);
+            // Callee sets remote desc immediately, so we can usually add directly
+            // But checking the flag is safe
+            if (this.remoteDescriptionSet) {
+                try {
+                    await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                    console.log("PulseRTC: Added Offer Candidate (Live)");
+                } catch (e) {
+                    console.error("PulseRTC: Error adding offer candidate (Live)", e);
+                }
+            } else {
+                console.log("PulseRTC: Buffering Offer Candidate (Unexpected: Remote not set)");
+                this.candidateQueue.push(candidate);
+            }
           }
-        });
+        }
       }
     });
 
@@ -228,14 +315,18 @@ export class WebRTCService {
   }
 
   async cleanup(callId: string | null) {
-    // Unsubscribe from all Firestore listeners to prevent memory leaks and ghost updates
+    console.log("PulseRTC: Cleaning up session");
+    // Unsubscribe from all Firestore listeners
     this.unsubscribes.forEach(unsub => unsub());
     this.unsubscribes = [];
-    this.processedCandidateszb.clear();
+    this.processedCandidates.clear();
+    this.candidateQueue = [];
+    this.remoteDescriptionSet = false;
 
     if (this.peerConnection) {
       this.peerConnection.ontrack = null;
       this.peerConnection.onicecandidate = null;
+      this.peerConnection.onconnectionstatechange = null;
       this.peerConnection.close();
       this.peerConnection = null;
     }
@@ -254,16 +345,17 @@ export class WebRTCService {
         const snap = await getDoc(callRef);
         if (snap.exists()) {
           const data = snap.data();
-          // Only end if not already ended/rejected to avoid overwriting final state
+          // Only end if not already ended/rejected
           if (data.status !== "ended" && data.status !== "rejected") {
             await updateDoc(callRef, {
               status: "ended",
               endedAt: Date.now(),
             });
+            console.log("PulseRTC: Call marked as ended in DB");
           }
         }
       } catch (e) {
-        // ignore errors during cleanup
+        console.warn("PulseRTC: Cleanup DB update failed (likely already gone)", e);
       }
     }
   }

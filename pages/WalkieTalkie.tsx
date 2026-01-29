@@ -35,12 +35,13 @@ const WalkieTalkie: React.FC = () => {
   const [loadingFriends, setLoadingFriends] = useState(true);
   const [connectionError, setConnectionError] = useState(false);
   
-  const initializingRef = useRef(false);
+  // Track previous friend to prevent re-connecting on same selection
+  const prevFriendIdRef = useRef<string | null>(null);
 
+  // 1. Fetch Friends
   useEffect(() => {
     if (!db || !user) return;
 
-    // Listen to confirmed friendships where current user is userA or userB
     const q1 = query(collection(db, "friendships"), where("userA", "==", user.uid));
     const q2 = query(collection(db, "friendships"), where("userB", "==", user.uid));
 
@@ -64,8 +65,8 @@ const WalkieTalkie: React.FC = () => {
        const profilesA = await handleFriendSnaps(snap1);
        setFriends(prev => {
          const combined = [...prev, ...profilesA];
-         const unique = combined.filter((v, i, a) => a.findIndex(t => t.uid === v.uid) === i);
-         return unique;
+         // Unique by uid
+         return combined.filter((v, i, a) => a.findIndex(t => t.uid === v.uid) === i);
        });
        setLoadingFriends(false);
     });
@@ -74,8 +75,7 @@ const WalkieTalkie: React.FC = () => {
        const profilesB = await handleFriendSnaps(snap2);
        setFriends(prev => {
          const combined = [...prev, ...profilesB];
-         const unique = combined.filter((v, i, a) => a.findIndex(t => t.uid === v.uid) === i);
-         return unique;
+         return combined.filter((v, i, a) => a.findIndex(t => t.uid === v.uid) === i);
        });
        setLoadingFriends(false);
     });
@@ -86,55 +86,64 @@ const WalkieTalkie: React.FC = () => {
     };
   }, [user?.uid]);
 
+  // 2. Select first friend by default
   useEffect(() => {
     if (friends.length > 0 && !selectedFriend) {
       setSelectedFriend(friends[0]);
-      setConnectionError(false); // Reset error when friend selection changes (initially)
     }
   }, [friends]);
 
-  // When selected friend changes, clear error so we can try connecting again
+  // 3. Connect to friend (ONE SHOT, no loop)
   useEffect(() => {
-    setConnectionError(false);
-  }, [selectedFriend?.uid]);
+    // If no friend selected, or not ready, or already failed, or already connecting... stop.
+    if (!selectedFriend || !user || !isReady || connectionError) return;
 
-  useEffect(() => {
-    if (!selectedFriend || !user || !isReady || initializingRef.current || connectionError) return;
-
+    // Check if we are already in a call with this person
     const isCurrentSessionWithFriend =
       activeCall &&
       (activeCall.calleeId === selectedFriend.uid ||
         activeCall.callerId === selectedFriend.uid);
 
+    // If we have an active call with someone else, end it.
     if (activeCall && !isCurrentSessionWithFriend && callStatus !== CallStatus.ENDED) {
+      console.log("Ending call with previous user to switch to", selectedFriend.displayName);
       endCall();
+      return; 
+    }
+
+    // If we are already connected/connecting to this friend, do nothing.
+    if (isCurrentSessionWithFriend && callStatus !== CallStatus.ENDED) {
       return;
     }
 
-    if (!activeCall && !incomingCall && callStatus === CallStatus.ENDED) {
-      initializingRef.current = true;
-      const timer = setTimeout(() => {
-        makeCall(selectedFriend.uid, selectedFriend.displayName)
-          .catch((err) => {
-            console.error("Failed to connect:", err);
-            setConnectionError(true);
-          })
-          .finally(() => {
-            initializingRef.current = false;
-          });
-      }, 1000);
-      return () => clearTimeout(timer);
-    }
-  }, [selectedFriend?.uid, isReady, activeCall?.callId, callStatus, incomingCall?.callId, connectionError]);
+    // If we have an incoming call, don't auto-connect
+    if (incomingCall) return;
 
+    // Only connect if the friend selection changed or we are purely idle
+    if (selectedFriend.uid !== prevFriendIdRef.current || (!activeCall && callStatus === CallStatus.ENDED)) {
+       console.log("PulseUI: Initiating connection to", selectedFriend.displayName);
+       prevFriendIdRef.current = selectedFriend.uid;
+       
+       makeCall(selectedFriend.uid, selectedFriend.displayName)
+          .catch((err) => {
+            console.error("PulseUI: Failed to connect:", err);
+            setConnectionError(true);
+          });
+    }
+
+  }, [selectedFriend, isReady, activeCall, callStatus, incomingCall, connectionError]);
+
+  // 4. Auto-Answer incoming
   useEffect(() => {
     if (incomingCall && callStatus === CallStatus.RINGING) {
+      console.log("PulseUI: Auto-answering incoming call");
       answerCall();
     }
   }, [incomingCall, callStatus]);
 
   const handleManualRetry = () => {
     setConnectionError(false);
+    prevFriendIdRef.current = null; // Force effect to re-run
   };
 
   const isConnected = callStatus === CallStatus.CONNECTED;
@@ -168,7 +177,10 @@ const WalkieTalkie: React.FC = () => {
       stream.getTracks().forEach((track) => track.stop());
       ensureAudioContext();
       setIsReady(true);
+      // Reset previous friend ref to ensure we try connecting once ready
+      prevFriendIdRef.current = null;
     } catch (e) {
+      console.error("PulseUI: Mic permission error", e);
       setPermissionDenied(true);
     }
   };
@@ -222,7 +234,12 @@ const WalkieTalkie: React.FC = () => {
             return (
               <button
                 key={friend.uid}
-                onClick={() => setSelectedFriend(friend)}
+                onClick={() => {
+                  if (selectedFriend?.uid !== friend.uid) {
+                    setSelectedFriend(friend);
+                    setConnectionError(false);
+                  }
+                }}
                 className={`flex flex-col items-center space-y-2 min-w-[80px] snap-center transition-all ${isSelected ? "opacity-100 scale-110" : "opacity-30 grayscale"}`}
               >
                 <div className={`w-16 h-16 rounded-full p-0.5 ${isSelected ? "bg-primary shadow-[0_0_20px_rgba(59,130,246,0.6)]" : "bg-gray-700"}`}>
@@ -262,7 +279,7 @@ const WalkieTalkie: React.FC = () => {
               className="bg-red-500/20 text-red-500 px-6 py-2 rounded-full text-[11px] font-black flex items-center gap-2 hover:bg-red-500/30 transition-colors uppercase"
             >
               <RefreshCw size={12} />
-              Connection Failed - Retry
+              Retry Connection
             </button>
           ) : (
             <div className="text-gray-600 text-[10px] font-black tracking-[0.3em] uppercase opacity-30 italic">
