@@ -191,11 +191,13 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
         playTone("ON");
       }
 
-      if (data.activeSpeakerId !== undefined) {
-        setActiveCall((prev) =>
-          prev ? { ...prev, activeSpeakerId: data.activeSpeakerId } : null,
-        );
-      }
+      // CRITICAL FIX: Handle activeSpeakerId updates correctly.
+      // In RTDB, setting a value to null removes the key.
+      // So if 'activeSpeakerId' is undefined in 'data', it means it was set to null (stopped talking).
+      // We must explicitly default to null in that case to clear the state.
+      setActiveCall((prev) =>
+        prev ? { ...prev, activeSpeakerId: data.activeSpeakerId || null } : null,
+      );
 
       if (["ENDED", "REJECTED"].includes(data.status)) {
         cleanupCall();
