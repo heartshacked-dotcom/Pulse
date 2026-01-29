@@ -61,7 +61,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     uid: firebaseUser.uid,
                     displayName: firebaseUser.displayName || 'Unknown',
                     email: firebaseUser.email,
-                    photoURL: firebaseUser.photoURL || null,
+                    // Prioritize existing DB photo, fallback to Auth photo, then null
+                    photoURL: data.photoURL || firebaseUser.photoURL || null,
                     lastActive: serverTimestamp(),
                     pin: data.pin // Ensure PIN is persisted/merged
                 };
