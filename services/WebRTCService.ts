@@ -90,7 +90,7 @@ export class WebRTCService {
           addDoc(offerCandidatesCol, {
             candidate: event.candidate.toJSON(),
             type: "caller",
-          });
+          }).catch(e => console.error("Error adding offer candidate:", e));
         } else {
           candidateQueue.push(event.candidate);
         }
@@ -122,7 +122,7 @@ export class WebRTCService {
       addDoc(offerCandidatesCol, {
         candidate: candidate.toJSON(),
         type: "caller",
-      });
+      }).catch(e => console.error("Error adding queued offer candidate:", e));
     });
 
     onSnapshot(callDocRef, (snapshot) => {
@@ -166,7 +166,7 @@ export class WebRTCService {
         addDoc(answerCandidatesCol, {
           candidate: event.candidate.toJSON(),
           type: "answer",
-        });
+        }).catch(e => console.error("Error adding answer candidate:", e));
       }
     };
 

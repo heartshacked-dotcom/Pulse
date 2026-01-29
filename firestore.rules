@@ -13,17 +13,12 @@ service cloud.firestore {
     }
 
     // Users: 
-    // - Authenticated users can read any profile (needed for search by Email/PIN and displaying friends)
-    // - Only the owner can write to their own profile
     match /users/{userId} {
       allow read: if isSignedIn();
       allow write: if isOwner(userId);
     }
 
     // Friend Requests:
-    // - Create: Must be the sender
-    // - Read/Query: Must be either the sender or the recipient
-    // - Delete: Either party can remove the request (accepting/declining)
     match /friendRequests/{requestId} {
       allow create: if isSignedIn() && request.resource.data.fromUid == request.auth.uid;
       allow read: if isSignedIn() && (
@@ -37,8 +32,6 @@ service cloud.firestore {
     }
 
     // Confirmed Friendships:
-    // - Read/Query: User must be one of the two participants (userA or userB)
-    // - Create: Allowed if the user is one of the participants
     match /friendships/{friendshipId} {
       allow read: if isSignedIn() && (
         resource.data.userA == request.auth.uid || 
@@ -55,8 +48,6 @@ service cloud.firestore {
     }
 
     // Calls:
-    // - Create: Caller must be the authenticated user
-    // - Read/Update: User must be either the caller or the callee
     match /calls/{callId} {
       allow create: if isSignedIn() && request.resource.data.callerId == request.auth.uid;
       allow read, update: if isSignedIn() && (
@@ -65,14 +56,18 @@ service cloud.firestore {
       );
 
       // WebRTC Signaling Sub-collections
+      // FIX: Allow create if signed in to avoid race condition with parent doc creation.
+      // We strictly enforce READ access, but allow write access for signaling speed.
       match /offerCandidates/{candidateId} {
-        allow read, write: if isSignedIn() && (
+        allow create: if isSignedIn();
+        allow read: if isSignedIn() && (
           get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid ||
           get(/databases/$(database)/documents/calls/$(callId)).data.calleeId == request.auth.uid
         );
       }
       match /answerCandidates/{candidateId} {
-        allow read, write: if isSignedIn() && (
+        allow create: if isSignedIn();
+        allow read: if isSignedIn() && (
           get(/databases/$(database)/documents/calls/$(callId)).data.callerId == request.auth.uid ||
           get(/databases/$(database)/documents/calls/$(callId)).data.calleeId == request.auth.uid
         );

@@ -7,6 +7,7 @@ import {
   User as UserIcon,
   AlertTriangle,
   UserPlus,
+  RefreshCw
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import { collection, query, where, onSnapshot, doc, getDoc } from "firebase/firestore";
@@ -32,6 +33,7 @@ const WalkieTalkie: React.FC = () => {
   const [isReady, setIsReady] = useState(false);
   const [permissionDenied, setPermissionDenied] = useState(false);
   const [loadingFriends, setLoadingFriends] = useState(true);
+  const [connectionError, setConnectionError] = useState(false);
   
   const initializingRef = useRef(false);
 
@@ -87,11 +89,17 @@ const WalkieTalkie: React.FC = () => {
   useEffect(() => {
     if (friends.length > 0 && !selectedFriend) {
       setSelectedFriend(friends[0]);
+      setConnectionError(false); // Reset error when friend selection changes (initially)
     }
   }, [friends]);
 
+  // When selected friend changes, clear error so we can try connecting again
   useEffect(() => {
-    if (!selectedFriend || !user || !isReady || initializingRef.current) return;
+    setConnectionError(false);
+  }, [selectedFriend?.uid]);
+
+  useEffect(() => {
+    if (!selectedFriend || !user || !isReady || initializingRef.current || connectionError) return;
 
     const isCurrentSessionWithFriend =
       activeCall &&
@@ -106,19 +114,28 @@ const WalkieTalkie: React.FC = () => {
     if (!activeCall && !incomingCall && callStatus === CallStatus.ENDED) {
       initializingRef.current = true;
       const timer = setTimeout(() => {
-        makeCall(selectedFriend.uid, selectedFriend.displayName).finally(() => {
-          initializingRef.current = false;
-        });
+        makeCall(selectedFriend.uid, selectedFriend.displayName)
+          .catch((err) => {
+            console.error("Failed to connect:", err);
+            setConnectionError(true);
+          })
+          .finally(() => {
+            initializingRef.current = false;
+          });
       }, 1000);
       return () => clearTimeout(timer);
     }
-  }, [selectedFriend?.uid, isReady, activeCall?.callId, callStatus, incomingCall?.callId]);
+  }, [selectedFriend?.uid, isReady, activeCall?.callId, callStatus, incomingCall?.callId, connectionError]);
 
   useEffect(() => {
     if (incomingCall && callStatus === CallStatus.RINGING) {
       answerCall();
     }
   }, [incomingCall, callStatus]);
+
+  const handleManualRetry = () => {
+    setConnectionError(false);
+  };
 
   const isConnected = callStatus === CallStatus.CONNECTED;
   const isConnecting = callStatus === CallStatus.OFFERING || callStatus === CallStatus.RINGING;
@@ -130,7 +147,7 @@ const WalkieTalkie: React.FC = () => {
     return u.uid === otherId;
   }) || selectedFriend;
 
-  const handleTouchStart = (e: any) => {
+  const SVGToucStart = (e: any) => {
     ensureAudioContext();
     if (!isConnected || isRemoteTalking) return;
     if (navigator.vibrate) navigator.vibrate(50);
@@ -239,6 +256,14 @@ const WalkieTalkie: React.FC = () => {
             <div className="text-primary text-[11px] font-black tracking-[0.4em] animate-pulse uppercase italic">
               Linking...
             </div>
+          ) : connectionError ? (
+            <button 
+              onClick={handleManualRetry}
+              className="bg-red-500/20 text-red-500 px-6 py-2 rounded-full text-[11px] font-black flex items-center gap-2 hover:bg-red-500/30 transition-colors uppercase"
+            >
+              <RefreshCw size={12} />
+              Connection Failed - Retry
+            </button>
           ) : (
             <div className="text-gray-600 text-[10px] font-black tracking-[0.3em] uppercase opacity-30 italic">
               Signal Ready
@@ -249,23 +274,23 @@ const WalkieTalkie: React.FC = () => {
         <div
           className={`relative w-80 h-80 flex items-center justify-center transition-all duration-500 ${isHoldingButton ? "scale-105" : ""}`}
           style={{ touchAction: "none" }}
-          onMouseDown={handleTouchStart}
-          onMouseUp={handleTouchEnd}
-          onMouseLeave={handleTouchEnd}
-          onTouchStart={handleTouchStart}
-          onTouchEnd={handleTouchEnd}
+          onMouseDown={isConnected ? SVGToucStart : undefined}
+          onMouseUp={isConnected ? handleTouchEnd : undefined}
+          onMouseLeave={isConnected ? handleTouchEnd : undefined}
+          onTouchStart={isConnected ? SVGToucStart : undefined}
+          onTouchEnd={isConnected ? handleTouchEnd : undefined}
         >
           {(isHoldingButton || isRemoteTalking) && (
             <div className={`absolute -inset-12 rounded-full border-4 ${isRemoteTalking ? "border-green-500/20" : "border-accent/20"} animate-[ping_2s_infinite]`}></div>
           )}
 
           <div
-            className={`w-full h-full rounded-[5rem] overflow-hidden border-[12px] shadow-2xl transition-all duration-700 bg-gray-900 ${isHoldingButton ? "border-accent shadow-accent/40" : isRemoteTalking ? "border-green-500 shadow-green-500/40" : isConnected ? "border-primary/20" : "border-gray-800"}`}
+            className={`w-full h-full rounded-[5rem] overflow-hidden border-[12px] shadow-2xl transition-all duration-700 bg-gray-900 ${isHoldingButton ? "border-accent shadow-accent/40" : isRemoteTalking ? "border-green-500 shadow-green-500/40" : isConnected ? "border-primary/20" : connectionError ? "border-red-900/40" : "border-gray-800"}`}
           >
             {activeFriend ? (
               <img
                 src={activeFriend.photoURL || DEFAULT_AVATAR}
-                className="w-full h-full object-cover select-none pointer-events-none brightness-75 transition-all duration-700"
+                className={`w-full h-full object-cover select-none pointer-events-none transition-all duration-700 ${connectionError ? "grayscale opacity-50" : "brightness-75"}`}
                 draggable={false}
                 alt=""
               />
@@ -291,7 +316,9 @@ const WalkieTalkie: React.FC = () => {
                 ? "Incoming Audio"
                 : isConnected
                   ? "Hold to Speak"
-                  : "Syncing Signals..."}
+                  : connectionError 
+                    ? "Offline"
+                    : "Syncing Signals..."}
           </p>
           <div className="flex gap-2">
             {[1, 2, 3, 4, 5, 6].map((i) => (
