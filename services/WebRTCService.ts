@@ -80,12 +80,20 @@ export class WebRTCService {
     const callDocRef = doc(collection(db, "calls"));
     const offerCandidatesCol = collection(callDocRef, "offerCandidates");
 
+    // Queue for ICE candidates to ensure they are written AFTER the parent document exists
+    let callDocCreated = false;
+    const candidateQueue: RTCIceCandidate[] = [];
+
     this.peerConnection.onicecandidate = (event) => {
       if (event.candidate) {
-        addDoc(offerCandidatesCol, {
-          candidate: event.candidate.toJSON(),
-          type: "caller",
-        });
+        if (callDocCreated) {
+          addDoc(offerCandidatesCol, {
+            candidate: event.candidate.toJSON(),
+            type: "caller",
+          });
+        } else {
+          candidateQueue.push(event.candidate);
+        }
       }
     };
 
@@ -107,6 +115,15 @@ export class WebRTCService {
     };
 
     await setDoc(callDocRef, callData);
+    
+    // Parent document created, flush the queue
+    callDocCreated = true;
+    candidateQueue.forEach((candidate) => {
+      addDoc(offerCandidatesCol, {
+        candidate: candidate.toJSON(),
+        type: "caller",
+      });
+    });
 
     onSnapshot(callDocRef, (snapshot) => {
       const data = snapshot.data();
