@@ -100,12 +100,9 @@ const WalkieTalkie: React.FC = () => {
     };
   }, [user?.uid]);
 
-  // 2. Default selection
-  useEffect(() => {
-    if (friends.length > 0 && !selectedFriend) {
-      handleFriendSelect(friends[0]);
-    }
-  }, [friends]);
+  // 2. Removed Automatic Selection
+  // We no longer auto-select the first friend. 
+  // The user must explicitly choose a channel to connect.
 
   // 3. Centralized Connection Logic
   useEffect(() => {
@@ -230,21 +227,25 @@ const WalkieTalkie: React.FC = () => {
   let glowColor = "shadow-none";
   let statusText = "Ready";
   let showRetry = false;
+  let statusSubtext = "Establishing Link...";
   
   if (isHoldingButton) {
      stateColor = "text-rose-500";
      ringColor = "border-rose-500";
      glowColor = "shadow-[0_0_80px_rgba(244,63,94,0.4)]";
      statusText = "TRANSMITTING";
+     statusSubtext = "Release to Listen";
   } else if (isRemoteTalking) {
      stateColor = "text-emerald-500";
      ringColor = "border-emerald-500";
      glowColor = "shadow-[0_0_80px_rgba(16,185,129,0.4)]";
      statusText = "RECEIVING";
+     statusSubtext = selectedFriend?.displayName || "Unknown";
   } else if (isConnecting) {
      stateColor = "text-amber-500";
      ringColor = "border-amber-500 border-dashed animate-spin-slow";
      statusText = "TUNING...";
+     statusSubtext = "Syncing Frequency";
   } else if (connectionError) {
      stateColor = "text-red-500";
      ringColor = "border-red-900";
@@ -254,6 +255,12 @@ const WalkieTalkie: React.FC = () => {
      stateColor = "text-primary";
      ringColor = "border-primary/50";
      statusText = "CHANNEL OPEN";
+     statusSubtext = "Hold to Broadcast";
+  } else if (!selectedFriend) {
+     stateColor = "text-slate-600";
+     ringColor = "border-slate-800";
+     statusText = "STANDBY";
+     statusSubtext = "Select a Channel";
   } else {
      // Idle state but trying to connect (gap between effect runs)
      statusText = "SEARCHING...";
@@ -340,7 +347,7 @@ const WalkieTalkie: React.FC = () => {
              <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-slate-900 border border-white/5 shadow-xl">
                  {connectionError ? <WifiOff size={14} className="text-red-500" /> : <Signal size={14} className={isConnected ? "text-primary" : "text-slate-600"} />}
                  <span className={`text-[10px] font-black tracking-widest uppercase ${isConnected ? "text-white" : "text-slate-500"}`}>
-                    {connectionError ? "LINK FAILED" : isConnected ? "LINK ESTABLISHED" : "SEARCHING..."}
+                    {connectionError ? "LINK FAILED" : isConnected ? "LINK ESTABLISHED" : !selectedFriend ? "STANDBY" : "SEARCHING..."}
                  </span>
              </div>
          </div>
@@ -388,11 +395,11 @@ const WalkieTalkie: React.FC = () => {
                {statusText}
             </h2>
             <div className="mt-2 text-xs font-medium text-slate-500 uppercase tracking-[0.2em]">
-               {isHoldingButton ? "Release to Listen" : 
-                isRemoteTalking ? selectedFriend?.displayName : 
-                isConnected ? "Hold to Broadcast" : 
-                showRetry ? <button onClick={handleManualRetry} className="underline text-primary hover:text-white transition-colors">Retry Connection</button> : 
-                "Establishing Link..."}
+               {showRetry ? (
+                   <button onClick={handleManualRetry} className="underline text-primary hover:text-white transition-colors">Retry Connection</button>
+               ) : (
+                   statusSubtext
+               )}
             </div>
          </div>
 
