@@ -432,8 +432,9 @@ const AppContent: React.FC = () => {
     // Enable Background Mode
     const initBackgroundMode = async () => {
         try {
-            await BackgroundMode.enable();
-            await BackgroundMode.setSettings({
+            // Updated API call for @anuradev/capacitor-background-mode version ^7.2.1
+            // Arguments passed directly to enable()
+            await BackgroundMode.enable({
                 title: "Pulse is active",
                 text: "Listening for comms...",
                 hidden: false,
