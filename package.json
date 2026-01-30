@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@anuradev/capacitor-background-mode": "^0.0.3",
     "@capacitor/android": "^7.1.0",
     "@capacitor/core": "^7.1.0",
 

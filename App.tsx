@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { useCall, CallProvider } from "./context/CallContext";
@@ -10,6 +9,7 @@ import { collection, query, where, getDocs, addDoc, onSnapshot, doc, updateDoc, 
 import { ref, onValue, onDisconnect, set, serverTimestamp } from "firebase/database";
 import { db, rtdb } from "./services/firebase";
 import { FriendRequest } from "./types";
+import { BackgroundMode } from "@anuradev/capacitor-background-mode";
 
 const GlobalAudioSink: React.FC = () => {
   const { remoteAudioRef } = useCall();
@@ -425,22 +425,38 @@ const AppContent: React.FC = () => {
   const { user, loading } = useAuth();
   const [page, setPage] = useState("ptt");
 
-  // PRESENCE SYSTEM (RTDB)
+  // PRESENCE SYSTEM & BACKGROUND MODE
   useEffect(() => {
     if (!user || !rtdb) return;
 
-    // Reference to the special '.info/connected' path
+    // Enable Background Mode
+    const initBackgroundMode = async () => {
+        try {
+            await BackgroundMode.enable();
+            await BackgroundMode.setSettings({
+                title: "Pulse is active",
+                text: "Listening for comms...",
+                hidden: false,
+                silent: false,
+                resume: true,
+                color: "0f172a"
+            });
+        } catch (e) {
+            console.warn("Background Mode Init Error:", e);
+        }
+    };
+    initBackgroundMode();
+
+    // Presence Logic
     const connectedRef = ref(rtdb, '.info/connected');
     const userStatusRef = ref(rtdb, `status/${user.uid}`);
 
     const unsubscribe = onValue(connectedRef, (snap) => {
        if (snap.val() === true) {
-          // When we connect, set up the disconnect hook first
           onDisconnect(userStatusRef).set({
              state: 'offline',
              lastChanged: serverTimestamp()
           }).then(() => {
-             // Then set online status
              set(userStatusRef, {
                 state: 'online',
                 lastChanged: serverTimestamp()
