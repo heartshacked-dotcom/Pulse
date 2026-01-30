@@ -49,6 +49,12 @@ export class WebRTCService {
   private currentCallId: string | null = null;
   private isOfferer = false; // Role tracking for ICE restart
   private isRenegotiating = false; // Prevent overlapping renegotiations
+  private processingRemoteDescription = false; // Prevent race conditions in signaling
+  
+  // Important: Track the exact SDP string we last processed from the DB.
+  // We cannot rely on peerConnection.remoteDescription.sdp because browsers normalize SDPs (whitespace, ordering),
+  // which causes strict string equality checks against the DB value to fail, triggering infinite loops.
+  private lastProcessedOfferSdp: string | null = null;
 
   constructor() {
     console.log("PulseRTC: Service initialized");
@@ -109,6 +115,8 @@ export class WebRTCService {
     this.currentCallId = null;
     this.isOfferer = false;
     this.isRenegotiating = false;
+    this.processingRemoteDescription = false;
+    this.lastProcessedOfferSdp = null;
 
     // 3. Close PeerConnection
     if (this.peerConnection) {
@@ -179,13 +187,18 @@ export class WebRTCService {
               await this.peerConnection.setLocalDescription(offer);
               
               const callRef = ref(rtdb, `calls/${this.currentCallId}`);
+              // Important: Clear 'answer' so the stale answer doesn't trigger invalid state transitions
               await update(callRef, {
-                  offer: { type: offer.type, sdp: offer.sdp }
+                  offer: { type: offer.type, sdp: offer.sdp },
+                  answer: null 
               });
           } catch (e: any) {
               console.error("PulseRTC: ICE Restart failed", e.message || e);
           } finally {
-              this.isRenegotiating = false;
+              // Add a small delay before allowing another renegotiation to prevent tight loops
+              setTimeout(() => {
+                  this.isRenegotiating = false;
+              }, 2000);
           }
       }
   }
@@ -284,10 +297,12 @@ export class WebRTCService {
       if (this.currentCallId !== callId || !this.peerConnection || !data) return;
 
       // Handle Answer (Works for both initial connection and ICE restart)
-      if (data.answer) {
+      // Added lock processingRemoteDescription to prevent race conditions from double snapshots
+      if (data.answer && !this.processingRemoteDescription) {
         const hasLocalOffer = this.peerConnection.signalingState === 'have-local-offer';
         
         if (hasLocalOffer) {
+            this.processingRemoteDescription = true;
             console.log("PulseRTC: Received Answer, setting remote description...");
             const answerDescription = new RTCSessionDescription(data.answer);
             try {
@@ -299,8 +314,10 @@ export class WebRTCService {
               if (data.status === 'CONNECTING') {
                   await update(callRef, { status: 'CONNECTED' });
               }
-            } catch (e) {
-              console.error("PulseRTC: Error setting remote description", e);
+            } catch (e: any) {
+              console.error("PulseRTC: Error setting remote description", e.message || e);
+            } finally {
+              this.processingRemoteDescription = false;
             }
         }
       }
@@ -370,6 +387,8 @@ export class WebRTCService {
         try {
           await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerDescription));
           this.remoteDescriptionSet = true;
+          // IMPORTANT: Capture the initial offer SDP so we don't think it's a restart later
+          this.lastProcessedOfferSdp = offerDescription.sdp;
         } catch (e) {
           console.error("PulseRTC: Failed to set remote description", e);
           throw e;
@@ -417,12 +436,16 @@ export class WebRTCService {
         const data = snapshot.val();
         if (this.currentCallId !== callId || !this.peerConnection || !data || !data.offer) return;
 
-        const currentRemoteSdp = this.peerConnection.remoteDescription?.sdp;
         const newOfferSdp = data.offer.sdp;
 
-        // If we receive a new offer while in stable state (ICE Restart)
-        if (newOfferSdp && newOfferSdp !== currentRemoteSdp && this.peerConnection.signalingState === 'stable') {
+        // CRITICAL FIX: Loop Prevention
+        // We compare the new offer SDP against the *last one we processed from the DB*.
+        // We DO NOT compare against peerConnection.remoteDescription.sdp because browsers may normalize/reformat 
+        // the SDP string after setting it, causing strict equality checks to fail even if they are semantically identical.
+        if (newOfferSdp && newOfferSdp !== this.lastProcessedOfferSdp && this.peerConnection.signalingState === 'stable') {
             console.log("PulseRTC: Detected new offer (ICE Restart)");
+            this.lastProcessedOfferSdp = newOfferSdp;
+            
             try {
                 // Ensure we explicitly set type to 'offer' to avoid "createAnswer not called" errors
                 // caused by implicit state issues or malformed objects.

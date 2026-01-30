@@ -55,8 +55,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isMediaReady, setIsMediaReady] = useState(false);
 
-  // We persist the service instance for the lifecycle of the provider
-  const rtcRef = useRef<WebRTCService>(new WebRTCService());
+  // Lazy initialization of the service to prevent reconstruction on every render
+  const rtcRef = useRef<WebRTCService | null>(null);
+  if (!rtcRef.current) {
+    rtcRef.current = new WebRTCService();
+  }
+
   const audioContextRef = useRef<AudioContext | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
 
@@ -83,7 +87,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     let mounted = true;
     const setup = async () => {
        try {
-         const stream = await rtcRef.current.acquireMedia();
+         const service = rtcRef.current!;
+         const stream = await service.acquireMedia();
          if (mounted) {
             setLocalStream(stream);
             setIsMediaReady(true);
@@ -97,7 +102,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     
     return () => {
       mounted = false;
-      rtcRef.current.releaseMedia();
+      if (rtcRef.current) {
+        rtcRef.current.releaseMedia();
+      }
     };
   }, []);
 
@@ -272,11 +279,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     ensureAudioContext();
 
     try {
+      const service = rtcRef.current!;
       // Ensure media is ready and MUTED
-      const stream = await rtcRef.current.acquireMedia();
+      const stream = await service.acquireMedia();
       stream.getAudioTracks().forEach(t => t.enabled = false);
 
-      rtcRef.current.createPeerConnection((remoteStream) => {
+      service.createPeerConnection((remoteStream) => {
         setRemoteStream(remoteStream);
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = remoteStream;
@@ -284,7 +292,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
         }
       });
 
-      const callId = await rtcRef.current.createCall(
+      const callId = await service.createCall(
         user.uid,
         calleeId,
         {
@@ -331,11 +339,12 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     ensureAudioContext();
 
     try {
+      const service = rtcRef.current!;
       // Ensure media is ready and MUTED
-      const stream = await rtcRef.current.acquireMedia();
+      const stream = await service.acquireMedia();
       stream.getAudioTracks().forEach(t => t.enabled = false);
 
-      rtcRef.current.createPeerConnection((remoteStream) => {
+      service.createPeerConnection((remoteStream) => {
         setRemoteStream(remoteStream);
         if (remoteAudioRef.current) {
           remoteAudioRef.current.srcObject = remoteStream;
@@ -343,7 +352,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
         }
       });
 
-      await rtcRef.current.answerCall(incomingCall.callId);
+      await service.answerCall(incomingCall.callId);
 
       setActiveCall(incomingCall);
       setIncomingCall(null);
@@ -394,7 +403,9 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     setIncomingCall(null);
     setRemoteStream(null);
 
-    rtcRef.current.endCurrentSession(activeCall?.callId || null);
+    if (rtcRef.current) {
+        rtcRef.current.endCurrentSession(activeCall?.callId || null);
+    }
   };
 
   const endCall = async () => {
