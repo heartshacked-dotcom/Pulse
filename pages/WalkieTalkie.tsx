@@ -44,6 +44,11 @@ const WalkieTalkie: React.FC = () => {
   // Track the target friend to ensure we don't start call for old selection
   const targetFriendIdRef = useRef<string | null>(null);
 
+  // Track previous status to detect call failures (OFFERING -> ENDED)
+  const prevStatusRef = useRef<CallStatus>(CallStatus.ENDED);
+  // Track if we are intentionally switching channels to ignore expected disconnects
+  const isSwitchingRef = useRef(false);
+
   // 1. Fetch Friends & Status
   useEffect(() => {
     if (!db || !user || !rtdb) return;
@@ -127,13 +132,14 @@ const WalkieTalkie: React.FC = () => {
     // If we are connected to someone else, end it
     if (activeCall && currentActiveId !== desiredId) {
         console.log("Switching: Ending previous call");
+        isSwitchingRef.current = true; // Mark as intentional switch
         endCall();
         return; // Wait for state to become ENDED
     }
 
     // If no active call and status is ended, start new call
     if (!activeCall && callStatus === CallStatus.ENDED) {
-        // Debounce slightly or check logic
+        // Check connectionError to prevent infinite loops
         if (targetFriendIdRef.current === desiredId && !connectionError) {
             console.log("Switching: Starting new call to", desiredId);
             makeCall(desiredId, selectedFriend.displayName)
@@ -145,18 +151,42 @@ const WalkieTalkie: React.FC = () => {
     }
   }, [selectedFriend, isMediaReady, activeCall, callStatus, incomingCall, connectionError]);
 
+  // 4. Error Detector: Prevent Infinite Loops
+  useEffect(() => {
+     // Check if we were previously trying to connect
+     const wasConnecting = prevStatusRef.current === CallStatus.OFFERING || 
+                           prevStatusRef.current === CallStatus.RINGING || 
+                           prevStatusRef.current === CallStatus.CONNECTING;
+     
+     const isEnded = callStatus === CallStatus.ENDED || callStatus === CallStatus.REJECTED;
+
+     if (wasConnecting && isEnded) {
+         if (isSwitchingRef.current) {
+             // We intentionally ended the call to switch channels. This is normal.
+             isSwitchingRef.current = false;
+         } else {
+             // The call ended without us initiating a switch (Timeout, Reject, Error).
+             // Set error state to halt the auto-retry loop.
+             console.log("Pulse: Call connection failed (Timeout/Rejected). Halting retry loop.");
+             setConnectionError(true);
+         }
+     }
+     prevStatusRef.current = callStatus;
+  }, [callStatus]);
+
   // Handle manual selection change
   const handleFriendSelect = (friend: UserProfile) => {
       if (selectedFriend?.uid === friend.uid) return;
       
       setConnectionError(false);
+      isSwitchingRef.current = false; // Reset switch flag
       setSelectedFriend(friend);
       targetFriendIdRef.current = friend.uid;
       
-      // If we are already calling someone else, we rely on the effect above to tear it down first
+      // If we are already calling someone else, the main effect handles the teardown
   };
 
-  // 4. Auto-Answer
+  // 5. Auto-Answer
   useEffect(() => {
     if (incomingCall && callStatus === CallStatus.RINGING) answerCall();
   }, [incomingCall, callStatus]);
