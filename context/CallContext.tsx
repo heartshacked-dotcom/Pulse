@@ -71,6 +71,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
   // Watchdog Timers
   const offeringTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const ringingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const connectingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   const statusRef = useRef<CallStatus>(CallStatus.ENDED);
   const activeCallRef = useRef<CallSession | null>(null);
@@ -236,10 +237,18 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
       }
 
       // 2. STATE: CONNECTING (Key Exchange)
-      if (data.status === 'CONNECTING' && statusRef.current === CallStatus.RINGING) {
+      if (data.status === 'CONNECTING' && (statusRef.current === CallStatus.RINGING || statusRef.current === CallStatus.OFFERING)) {
         setCallStatus(CallStatus.CONNECTING);
-        // Clear ringing watchdog
+        // Clear previous watchdogs
+        if (offeringTimeoutRef.current) clearTimeout(offeringTimeoutRef.current);
         if (ringingTimeoutRef.current) clearTimeout(ringingTimeoutRef.current);
+        
+        // Start CONNECTING watchdog
+        if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
+        connectingTimeoutRef.current = setTimeout(() => {
+            console.log("Pulse: Call timed out in CONNECTING phase (ICE failure?)");
+            endCall();
+        }, 20000); // 20s for ICE negotiation
       }
 
       // 3. STATE: CONNECTED
@@ -249,6 +258,7 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
         // Ensure watchdogs are clear
         if (offeringTimeoutRef.current) clearTimeout(offeringTimeoutRef.current);
         if (ringingTimeoutRef.current) clearTimeout(ringingTimeoutRef.current);
+        if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
       }
 
       // Active Speaker Logic
@@ -358,6 +368,14 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
       setIncomingCall(null);
       // We set local status to CONNECTING immediately as we have sent the answer
       setCallStatus(CallStatus.CONNECTING);
+      
+      // Start Connecting Watchdog locally as well
+      if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
+      connectingTimeoutRef.current = setTimeout(() => {
+          console.log("Pulse: Answered call timed out in CONNECTING phase");
+          endCall();
+      }, 20000);
+
     } catch (e) {
       console.error("Error answering walkie call:", e);
       cleanupCall();
@@ -392,8 +410,10 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
     // Clear Timers
     if (offeringTimeoutRef.current) clearTimeout(offeringTimeoutRef.current);
     if (ringingTimeoutRef.current) clearTimeout(ringingTimeoutRef.current);
+    if (connectingTimeoutRef.current) clearTimeout(connectingTimeoutRef.current);
     offeringTimeoutRef.current = null;
     ringingTimeoutRef.current = null;
+    connectingTimeoutRef.current = null;
 
     statusRef.current = CallStatus.ENDED;
     activeCallRef.current = null;

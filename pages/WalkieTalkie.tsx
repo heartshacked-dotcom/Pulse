@@ -197,7 +197,10 @@ const WalkieTalkie: React.FC = () => {
   };
 
   const isConnected = callStatus === CallStatus.CONNECTED;
-  const isConnecting = callStatus === CallStatus.OFFERING || callStatus === CallStatus.RINGING;
+  const isConnecting = callStatus === CallStatus.OFFERING || 
+                       callStatus === CallStatus.RINGING || 
+                       callStatus === CallStatus.CONNECTING;
+                       
   const isRemoteTalking = activeCall?.activeSpeakerId && activeCall.activeSpeakerId !== user?.uid;
 
   let stateColor = "text-slate-500";
