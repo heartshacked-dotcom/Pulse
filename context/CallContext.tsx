@@ -148,9 +148,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
                   await KeepAwake.keepAwake();
                   // Switch Android Audio Mode to IN_COMMUNICATION (VoIP)
                   try {
-                    await AudioToggle.setAudioMode({ mode: 'communication' });
-                    // Force Speakerphone for Walkie Talkie usage
-                    await AudioToggle.setSpeakerphoneOn(true);
+                    // Force Speakerphone for Walkie Talkie usage using correct API
+                    await AudioToggle.setSpeakerOn({ speakerOn: true });
                   } catch (audioErr) {
                     console.warn("Pulse: AudioToggle not supported or failed", audioErr);
                   }
@@ -163,7 +162,8 @@ export const CallProvider: React.FC<{ children: React.ReactNode }> = ({
               try {
                   await KeepAwake.allowSleep();
                   try {
-                    await AudioToggle.setAudioMode({ mode: 'normal' });
+                    // Revert Speakerphone
+                    await AudioToggle.setSpeakerOn({ speakerOn: false });
                   } catch (audioErr) {
                     console.warn("Pulse: AudioToggle reset failed", audioErr);
                   }
