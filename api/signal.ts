@@ -1,18 +1,21 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import * as admin from 'firebase-admin';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { getFirestore, FieldValue } from 'firebase-admin/firestore';
+import { getMessaging, MulticastMessage } from 'firebase-admin/messaging';
+import { getAuth } from 'firebase-admin/auth';
 
 // Initialize Firebase Admin SDK
 // This requires FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, and FIREBASE_PRIVATE_KEY
 // to be set in your Vercel Project Settings (Environment Variables).
-if (!admin.apps.length) {
+if (!getApps().length) {
   try {
     const privateKey = process.env.FIREBASE_PRIVATE_KEY 
       ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n') 
       : undefined;
 
     if (privateKey) {
-        admin.initializeApp({
-            credential: admin.credential.cert({
+        initializeApp({
+            credential: cert({
                 projectId: process.env.FIREBASE_PROJECT_ID,
                 clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
                 privateKey: privateKey,
@@ -26,8 +29,9 @@ if (!admin.apps.length) {
   }
 }
 
-const db = admin.firestore();
-const messaging = admin.messaging();
+const db = getFirestore();
+const messaging = getMessaging();
+const auth = getAuth();
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   // 1. Enable CORS for cross-origin requests (essential for mobile apps)
@@ -57,7 +61,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const idToken = authHeader.split('Bearer ')[1];
     
     // Validate the Firebase ID Token passed from the client
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const decodedToken = await auth.verifyIdToken(idToken);
     const callerUid = decodedToken.uid;
 
     // 3. Extract Payload
@@ -87,7 +91,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // 5. Construct High-Priority Data Message
     // Note: We intentionally do NOT use the 'notification' key. 
     // This ensures it is treated as a Data Message, triggering the app in background/doze.
-    const message: admin.messaging.MulticastMessage = {
+    const message: MulticastMessage = {
       tokens: tokens,
       data: {
         type: 'WAKE_UP',
@@ -134,7 +138,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
       if (invalidTokens.length > 0) {
         await db.collection('users').doc(calleeId).update({
-          fcmTokens: admin.firestore.FieldValue.arrayRemove(...invalidTokens)
+          fcmTokens: FieldValue.arrayRemove(...invalidTokens)
         });
         console.log(`Pulse Backend: Cleaned up ${invalidTokens.length} stale tokens for ${calleeId}`);
       }
